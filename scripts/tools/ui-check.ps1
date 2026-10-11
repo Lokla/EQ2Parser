@@ -310,11 +310,11 @@ $failed = $false
 $seen = New-Object 'System.Collections.Generic.HashSet[string]'
 $previousForeground = [UiCheckNative]::GetForegroundWindow()
 $crashesBefore = @(Get-CrashFiles | ForEach-Object { $_.Name })
-# At every launch the app points a per-user crash-dump registry value at its
-# data folder (SessionJournal.RegisterCrashDumps). Left alone, a scratch run
-# would leave it aimed at the scratch folder, so it is put back afterwards.
-# Current builds register under the real image name and delete the key older
-# builds wrote under EQ2Parser.exe; both are tracked so any build can be run.
+# Builds up to v0.5.7 pointed a per-user crash-dump registry value at their
+# data folder on every launch, so a scratch run of one would leave it aimed
+# at the scratch folder. The value is saved here and put back afterwards.
+# Current builds write nothing there and delete those keys (Windows ignores
+# them); both image names are tracked so any build can be run.
 $dumpRoot = 'HKCU:\Software\Microsoft\Windows\Windows Error Reporting\LocalDumps'
 $dumpKeys = @()
 foreach ($image in @([System.IO.Path]::GetFileName($Exe), 'EQ2Parser.App.exe', 'EQ2Parser.exe') | Select-Object -Unique) {

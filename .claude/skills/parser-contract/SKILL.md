@@ -89,56 +89,43 @@ The server must keep accepting whatever any released client sends.
 
 ## 4. End-to-end check
 
-Upload one fight from a parser build to a local server and read the stored row. Steps marked
-`(unverified)` were worked out from code and have not been run; fix this file once you have run them.
+One command uploads real fights from this working tree to a local copy of the site and reads
+back what it stored. It takes about a minute and it is the only check that runs the client's
+gzip, signature and queue against the site's real ingest route:
 
-**Server, from the EQ2Lexicon root**
+```powershell
+pwsh -NoProfile -File <EQ2Parser root>/scripts/tools/e2e-upload.ps1                      # site checkout beside this repo
+pwsh -NoProfile -File <EQ2Parser root>/scripts/tools/e2e-upload.ps1 -Lexicon <EQ2Lexicon root>
+pwsh -NoProfile -File <EQ2Parser root>/scripts/tools/e2e-upload.ps1 -Keep               # leave artifacts/e2e-upload to look at
+```
 
-1. Choose the database first: the backend applies migrations at startup and the upload writes rows.
-   The DSN is the first of `DATABASE_URL`, `SUPABASE_DB_URL`, `POSTGRES_CONNECTION_STRING` that is
-   set, and the local `.env` may name production. Set `DATABASE_URL` in the shell (it wins over `.env`)
-   to a local scratch database, in the form `EQ2Lexicon/.env.example` shows for `TEST_DATABASE_URL`, and
-   not the pytest one, which the suite wipes. Create it with `createdb eq2lexicon_contract` (unverified).
-2. Start it with the command inside `EQ2Lexicon/scripts/dev_backend.ps1`:
-   `uv run uvicorn backend.server.app:app --port 8000 --reload --reload-dir backend --timeout-graceful-shutdown 2`.
-   Keep `--reload`: on Windows `open_pools` refuses to start without it. `ALLOWED_SERVERS` decides which
-   `logger_server` passes; unset, it allows Varsoon and Wuoshi. A clean start on an empty database is (unverified).
-3. Get a token. No seed script mints one: `POST /api/auth/tokens` needs a browser session, and the
-   token is stored hashed in the `api_tokens` table of the `users` schema. Either sign in locally and
-   use `/settings/tokens` (needs the Discord OAuth variables and `HTTPS_ONLY=false`) (unverified), or
-   run the mint snippet in `references/wire.md` (unverified). No character claim is needed: an
-   unclaimed logger is stored with `uploader_verified = 0`, gets no guild and never ranks.
+It prints one `PASS` / `FAIL` line per check and ends `e2e-upload: OK` (exit 0), `FAIL` (1) or
+`INCOMPLETE` (2: something it needs is missing and nothing was checked). What it does:
 
-**Parser, from the EQ2Parser root**
+1. Creates a throwaway database on the local PostgreSQL the site's own tests use (the
+   `TEST_DATABASE_URL` in the site's `.env`; it refuses any host that is not local) and applies
+   the site's migrations. The site cannot even be imported against an empty database, so
+   migrations come first.
+2. Starts the site from its checkout, as it is on disk, with every database variable pointed at
+   that throwaway database, so no other database is reachable from the process.
+3. Mints an API token for a throwaway user in it.
+4. Runs this repo's app through `scripts/tools/ui-check.ps1` on scratch data with the committed
+   corpus under `logs/Varsoon` (accepted) and again under `logs/Kaladim` (not on the allow-list,
+   so refused with `X-Lexicon-Reject`). The token is written DPAPI-protected, as the app stores it.
+5. Reads the stored rows back and checks: fights stored for the accepted server and none for the
+   refused one, nothing quarantined, the queue not paused, no status-effect rows, heal / power /
+   threat rows carrying their `resist` label, cure rows carrying a count, no zero-activity rows.
+6. Stops the site, drops the database and deletes the token, whatever happened.
 
-4. Make an empty scratch directory and put a `settings.json` in it holding
-   `{ "LexiconBaseUrl": "http://localhost:8000", "FirstRunShown": true }` (a partial file like this
-   loads; `scripts/tools/ui-check.ps1` seeds its scratch runs the same way). No Settings control edits
-   the URL, and it is read at startup. `UrlProblem` allows plain http only for loopback.
-5. In PowerShell set `$env:EQ2PARSER_DATA_DIR = '<scratch dir>'` (it keeps the real settings, token
-   and history untouched), then run `dotnet run --project src/EQ2Parser.App`. In Settings, Parse
-   uploads: paste the token, Save, Test. Test calls whoami and should name the local user.
-6. Replay a short log. `logger_server` is the log's parent directory and `logger_name` the file name
-   (`LogPaths.ParseServerName`, `LogSource.DeriveOwner`), so copy a log to
-   `<scratch dir>/logs/<allowed server>/eq2log_<Letters>.txt`. The committed corpus in `tests/logs`
-   replays into two fights. In Sources choose "Add + parse existing". A fight ends only when a
-   later line falls outside the idle window, so the file needs a line after its last fight. Keep the
-   log inside the scratch directory: the app writes its raid command files into the folder above
-   `logs/`, and launching by hand leaves the Windows crash-dump registry value for the app pointing
-   at the scratch directory until the real app is next started.
-7. Upload. Right-click a fight and choose "Upload to EQ2Lexicon"; a manual upload carries no
-   `client_warnings`. For the automatic path, tick "Upload finished fights to EQ2Lexicon" before
-   step 6 instead: every fight in the file uploads (the server allows 60 a minute), stamped
-   `log_writer_unverified` because no game holds the file. The Settings status line shows the
-   server's `status`, or its `detail` on failure.
+It tests the site code that is on disk in the EQ2Lexicon checkout, uncommitted changes included,
+which is what you want when both halves of a change are in flight. Run it before releasing any
+change to the upload path, and after any change to the site's ingest route.
 
-**Read it back**
+**When the change adds something the script does not look at** (a new payload field, a new
+endpoint), run it with `-Keep`, then extend the checks in the script: `readback` in
+`scripts/tools/e2e_upload_helper.py` returns the stored rows as JSON and the script asserts on
+them. A check that exists only in your head is not run next time.
 
-8. Run the queries in `references/wire.md`. Check that the encounter row exists, that the new column
-   holds the parser's value rather than the fallback, and that `swing_type`, `success_level` and
-   `client_warnings` are what you sent. `quarantined` means the upload sits in `tamper_reports`
-   instead; `skipped` means that encid is already stored, so use another fight or a fresh database.
-
-**Cheaper, server half only.** Post the JSON `PayloadBuilder` produces with the hand-post snippet in
-`references/wire.md`. No dump switch exists: add a temporary `File.WriteAllText` of `payload.ToJson()`
-to the wire-shape test, run it, remove the line (unverified). It skips the client's gzip, signing and queue.
+**By hand, server half only.** To post one payload at the route without the app, the snippets in
+`references/wire.md` ("Exercising the wire locally") mint a token and sign a body. They skip the
+client's gzip, signing and queue, so they do not replace the script.

@@ -82,7 +82,7 @@ tables had dropped out of the published assembly, which the unit tests did not s
 liveness check did not either. Another threw at first render of the main view.
 
 If the release changes anything the site must agree with (upload or attendance payload, a
-mirrored list, a new endpoint), do the end-to-end check in the `parser-contract` skill before
+mirrored list, a new endpoint), run `scripts/tools/e2e-upload.ps1` (the `parser-contract` skill explains it) before
 going on. Uploads have shipped broken twice for want of one real request.
 
 ## 3. Tag and push

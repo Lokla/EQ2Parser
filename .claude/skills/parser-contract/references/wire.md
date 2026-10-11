@@ -259,11 +259,15 @@ v0.5.7 never read the header and pause on every 401 and 403.
 
 ## Exercising the wire locally
 
-These support the end-to-end check in `SKILL.md`. Each is (unverified): written from the code, not
-yet run. Keep them in a scratch directory and never commit a token.
+`scripts/tools/e2e-upload.ps1` does all of this in one command and is what to run (see `SKILL.md`).
+The pieces below are for poking at the route by hand. Keep them in a scratch directory and never
+commit a token. Two things the script taught us that the code does not make obvious: the site
+cannot be imported against an empty database, so apply migrations first
+(`from backend import pg_migrate; pg_migrate.run()`), and the stores need the pools opened.
 
-**Mint a local token.** Run from the EQ2Lexicon root with `DATABASE_URL` set to the local scratch
-database, after the backend has started once (it creates the schemas): `uv run python <scratch file>`.
+**Mint a local token.** Run from the EQ2Lexicon root with `DATABASE_URL` set to a LOCAL scratch
+database that has been migrated: `uv run --frozen python <scratch file>`. This is what
+`scripts/tools/e2e_upload_helper.py` does, and it has been run.
 
 ```python
 import asyncio
@@ -273,17 +277,19 @@ from backend.server import db as users_db
 
 
 async def main() -> None:
+    await pg.open_pools()
     # open_signup=True makes a brand-new user 'approved'; an unapproved account's token is a 403.
     await users_db.upsert_user("local-contract-check", "Local Check", "localcheck", None, open_signup=True)
     raw, _row = await users_db.mint_api_token("local-contract-check", "contract check")
     print(raw)  # shown once; only its hash is stored
+    await pg.close_pools()
 
 
 pg.ensure_selector_event_loop_policy()
 asyncio.run(main())
 ```
 
-**Post a payload by hand.** `python <scratch file> <payload.json> <token>`. It signs and sends the
+**Post a payload by hand** (not run; written from the code). `python <scratch file> <payload.json> <token>`. It signs and sends the
 file's exact bytes, uncompressed, so it tests the server against the parser's JSON and nothing else.
 
 ```python

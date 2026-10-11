@@ -107,9 +107,10 @@ to use the script instead of launching the app by hand with the variable set:
 - **It talks to the live site.** At startup the app fetches the public trigger library, which
   is what fills the Triggers and Timers pages. `-Offline` turns that off (those pages are then
   nearly empty).
-- **It rewrites a registry value.** Every launch points the per-user Windows crash-dump
-  folder for the app at its data folder (`SessionJournal.RegisterCrashDumps`), so a scratch
-  run would leave it aimed at the scratch folder. The script saves the value and puts it back.
+- **Older builds rewrite a registry value.** Builds up to v0.5.7 point a per-user Windows
+  crash-dump folder at their data folder on every launch, so a scratch run of one (`-Exe` on a
+  released build) would leave it aimed at the scratch folder. The script saves the value and
+  puts it back. Current builds write nothing there.
 
 Only the process the script started is closed. A copy of the app the developer has open is a
 live parsing session: never stop it. The window is on screen for a few seconds and can take

@@ -53,6 +53,7 @@ skill — see "Skills" below.
 ```
 pwsh -NoProfile -File scripts/tools/verify.ps1     # the CI gate, failures only
 pwsh -NoProfile -File scripts/tools/ui-check.ps1   # launch on scratch data, screenshot + rendered text
+pwsh -NoProfile -File scripts/tools/e2e-upload.ps1 # real uploads to a local copy of the site, read back
 dotnet run --project src/EQ2Parser.App             # run from source
 dotnet format EQ2Parser.slnx                       # fix a format failure
 ```
@@ -75,7 +76,7 @@ tag publishes a release to every installed copy; nothing is bumped.
 | `src/EQ2Parser.App` | WPF shell (net10.0-windows): main window, overlay, tray, settings, Velopack bootstrap. |
 | `tests/EQ2Parser.Core.Tests` | xunit. Golden-file tests use real EQ2 log excerpts under `tests/logs/`. Also the source-tree guards (localization, layering, agent docs). |
 | `tests/EQ2Parser.App.Tests` | xunit for App services; each class gets its own data directory, parallelism off. |
-| `scripts/tools` | Dev helpers: `verify.ps1`, `ui-check.ps1`, `logmine.ps1`. ASCII-only. |
+| `scripts/tools` | Dev helpers: `verify.ps1`, `ui-check.ps1`, `logmine.ps1`, `e2e-upload.ps1` (with its Python helper, run in the site's environment). The PowerShell is ASCII-only. |
 | `docs` | `engine-behaviour.md` (the stat and pipeline contract; source comments cite its sections), `code-signing.md`. |
 | `.claude/skills` | Agent skills, all named `parser-*`. |
 
