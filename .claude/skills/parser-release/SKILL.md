@@ -99,7 +99,7 @@ gh run list --repo VortexUK/EQ2Parser --workflow release.yml --limit 1 --json da
 gh run watch <databaseId> --repo VortexUK/EQ2Parser --exit-status
 ```
 
-Expect a few minutes: runs took two to three before the workflow gained its build, format and test steps. The run can take a few seconds to appear; check
+A run takes about four minutes (build, format, tests, publish, pack). The run can take a few seconds to appear; check
 again rather than chaining `sleep` in front of `gh`.
 
 - **No run appears** (an Actions outage has done this): leave the tag where it is. Deleting
