@@ -72,10 +72,21 @@ a chart and a combatant grid. Prefer `-Log` on each run over reusing a data fold
 earlier run: on a relaunch the same fights come back from the history archive only if they
 are recent enough, and the corpus is not, so the page comes up empty.
 
-To look at a specific state (a setting switched on, an overlay visible), there is no click
-automation beyond the tabs. Either write the state into a prepared data folder and pass
-`-DataDir`, or check the page that shows it and read the `.txt`. If the thing can only be
-reached by clicking through, say so and ask the user to look; do not claim it was checked.
+The Main page's fight list groups by day and only today's section starts expanded, so a log
+from another day shows one collapsed header and no fights to look at or select. Add `-Today`:
+it shifts every timestamp of the copied log so the last line is a minute old, leaving the
+spacing between lines (which is what fights are made of) alone.
+
+`-Select "text"` selects list items by text they contain: the first match is selected and each
+further one is added to the selection, as Ctrl+click would. Use it for the fight list
+(`-Select "Boss A","Boss B"` gives the combined view, `-Select "All Bosses"` a rollup) and for
+any other list. A text with no selectable item fails the page.
+
+Beyond tabs and list selection there is no click automation: no buttons, checkboxes, context
+menus or typing. To look at a state that needs those (a setting switched on, an overlay
+visible), write the state into a prepared data folder and pass `-DataDir`, or check the page
+that shows it and read the `.txt`. If the thing can only be reached by clicking through, say
+so and ask the user to look; do not claim it was checked.
 
 ## Safety, and why the script is shaped this way
 

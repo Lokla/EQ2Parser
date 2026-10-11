@@ -10,6 +10,8 @@
 #   ./scripts/tools/ui-check.ps1 -Exe publish/EQ2Parser.App.exe -AllPages   # a published build
 #   ./scripts/tools/ui-check.ps1 -DataDir <copy of a data folder>           # reproduce on real state
 #   ./scripts/tools/ui-check.ps1 -Page Settings -Expect "v0.5.8"            # text that must be on screen
+#   ./scripts/tools/ui-check.ps1 -Log <file> -Today                          # re-stamp the log to end a minute ago
+#   ./scripts/tools/ui-check.ps1 -Log <file> -Today -Select "Boss A","Boss B"   # select list items, then look
 #
 # What it checks, per page:
 #   * no visible text is an unresolved localization key (Loc.Get falls back to
@@ -20,6 +22,12 @@
 # Output: <Out>/<Page>.png and <Out>/<Page>.txt (every UI Automation name on
 # the page), one PASS/FAIL line per page, then "ui-check: OK" (exit 0),
 # "ui-check: FAIL" (exit 1) or "ui-check: INCOMPLETE" (exit 2).
+#
+# -Today matters for the Main page: its fight list groups by day and only
+# today's section starts expanded, so a log from last month shows a collapsed
+# header and no fights to select. -Select takes text that appears in a list
+# item (a fight's title, a row's name): the first match is selected, each
+# further one is ADDED to the selection, as Ctrl+click would.
 #
 # The app runs with EQ2PARSER_DATA_DIR pointed at a scratch folder, so the real
 # settings, history and token are never read or written. Its window is on
@@ -39,6 +47,8 @@ param(
     [string[]]$Expect = @(),
     [string]$Out,
     [switch]$Offline,
+    [switch]$Today,
+    [string[]]$Select = @(),
     [int]$SettleSeconds = 3,
     [int]$StartTimeoutSeconds = 45
 )
@@ -47,6 +57,7 @@ $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $navKeys = @('Main', 'Sources', 'Triggers', 'Timers', 'Overlays', 'Settings')
 # "-File ... -Page Main,Settings" arrives as one string, so split it here.
+$Select = @($Select | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 $Page = @($Page | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 if ($AllPages) { $Page = $navKeys }
 if (-not $Out) { $Out = Join-Path $repo 'artifacts\ui-check' }
@@ -150,6 +161,23 @@ else {
         [void](New-Item -ItemType Directory -Force -Path $logs)
         $copy = Join-Path $logs $src.Name
         Copy-Item -LiteralPath $src.FullName -Destination $copy -Force
+        if ($Today) {
+            # Shift every line's epoch by one amount so the last line lands a
+            # minute ago. Spacing between lines, which is what fights are made
+            # of, is unchanged; the bracketed local time is not read by the app.
+            $lines = [System.IO.File]::ReadAllLines($copy, [System.Text.Encoding]::UTF8)
+            $stamp = [regex]'^\((\d+)\)'
+            $last = 0L
+            foreach ($l in $lines) { $m = $stamp.Match($l); if ($m.Success) { $e = [long]$m.Groups[1].Value; if ($e -gt $last) { $last = $e } } }
+            if ($last -gt 0) {
+                $shift = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - 60 - $last
+                $moved = foreach ($l in $lines) {
+                    $m = $stamp.Match($l)
+                    if ($m.Success) { '(' + ([long]$m.Groups[1].Value + $shift) + ')' + $l.Substring($m.Length) } else { $l }
+                }
+                [System.IO.File]::WriteAllLines($copy, [string[]]$moved, $utf8)
+            }
+        }
         # LastPosition 0 = catch up from the first byte. Without a position a
         # restored source tails from the end and the page stays empty.
         $settings.Sources = @(@{ Path = $copy; ParseFromStart = $false; LastPosition = 0 })
@@ -233,6 +261,33 @@ function Select-Tab($root, [string]$label) {
     return $false
 }
 
+function Select-Items($root, [string[]]$texts) {
+    # Selects list items by text they contain. Returns the texts not found.
+    $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+    $missing = @()
+    $first = $true
+    foreach ($text in $texts) {
+        $done = $false
+        foreach ($row in (Get-Names $root)) {
+            if (-not $row.Name.Contains($text)) { continue }
+            $node = $row.Element
+            for ($i = 0; $i -lt 4 -and $node -and -not $done; $i++) {
+                $pattern = $null
+                if ($node.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$pattern)) {
+                    if ($first) { $pattern.Select() } else { $pattern.AddToSelection() }
+                    $first = $false
+                    $done = $true
+                }
+                else { $node = $walker.GetParent($node) }
+            }
+            if ($done) { break }
+        }
+        if (-not $done) { $missing += $text }
+        Start-Sleep -Milliseconds 400
+    }
+    return $missing
+}
+
 function Get-CrashFiles {
     $dir = Join-Path $DataDir 'crashes'
     if (Test-Path -LiteralPath $dir) { return @(Get-ChildItem -LiteralPath $dir -Filter 'crash-*.txt') }
@@ -313,6 +368,12 @@ try {
                 break
             }
 
+            $notSelected = @()
+            if ($Select.Count -gt 0) {
+                $notSelected = @(Select-Items $root $Select)
+                Start-Sleep -Seconds 1
+            }
+
             $rows = Get-Names $root
             $names = @($rows | ForEach-Object { $_.Name })
             foreach ($n in $names) { [void]$seen.Add($n) }
@@ -329,6 +390,7 @@ try {
             $missing = @($tabLabels | Where-Object { $names -notcontains $_ })
             if ($missing.Count -gt 0) { $problems += "tab labels not on screen: $($missing -join ', ')" }
             if (-not $shot) { $problems += 'screenshot failed' }
+            if ($notSelected.Count -gt 0) { $problems += "no selectable item containing: $($notSelected -join ', ')" }
 
             if ($problems.Count -gt 0) {
                 $failed = $true
