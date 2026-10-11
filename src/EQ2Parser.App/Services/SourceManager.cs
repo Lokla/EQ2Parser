@@ -1,3 +1,4 @@
+using EQ2Parser.App.Localization;
 using EQ2Parser.Core.Analysis;
 using EQ2Parser.Core.Correlation;
 using EQ2Parser.Core.Engine;
@@ -56,10 +57,14 @@ public sealed class SourceManager : IDisposable
     /// <summary>Curated source corrections + an optional local hot-fix file
     /// (%LocalAppData%\EQ2Parser\source_overrides.json, rules win over the
     /// embedded set) so a mislabel is fixable without waiting on a release.</summary>
-    public CombatantClassifier Classifier { get; } = new(new ClassIdentifier(
-        SpellClassMap.LoadEmbedded(),
-        SourceOverrides.LoadEmbedded()
-            .MergeFile(System.IO.Path.Combine(AppSettings.Directory, "source_overrides.json"))));
+    public CombatantClassifier Classifier { get; }
+
+    /// <summary>Why the local hot-fix file was ignored this session (it
+    /// did not parse), or null when it loaded or is absent. A bad file
+    /// never stops startup — MergeFile swallows it — but it used to do so
+    /// without a word, leaving the user's edit mysteriously inert; the
+    /// journal gets the reason at construction.</summary>
+    public string? SourceOverridesError { get; }
     public AlertAudioService Audio { get; }
     public TriggerService Triggers { get; }
     public TimerService SpellTimers { get; }
@@ -81,10 +86,25 @@ public sealed class SourceManager : IDisposable
     public HistoryService History { get; } = new();
     public UpdateService Updates { get; } = new();
     public UploadService Uploads { get; } = new();
-    public AppSettings Settings { get; set; } = AppSettings.Load();
+    public AppSettings Settings { get; set; }
 
-    public SourceManager()
+    /// <summary>Settings come IN rather than being loaded here: the UI
+    /// language lives in them, and the services built below resolve
+    /// status strings as they are constructed (Uploads.Configure sets
+    /// one). Taking them as a parameter makes the only possible order
+    /// "load settings → Loc.Initialize → build the manager" — when this
+    /// constructor loaded them itself, the dictionaries were still empty
+    /// and the Settings page showed a raw key until the status next
+    /// changed.</summary>
+    public SourceManager(AppSettings settings)
     {
+        Settings = settings;
+        var overrides = SourceOverrides.LoadEmbedded()
+            .MergeFile(System.IO.Path.Combine(AppSettings.Directory, "source_overrides.json"));
+        Classifier = new CombatantClassifier(new ClassIdentifier(SpellClassMap.LoadEmbedded(), overrides));
+        SourceOverridesError = overrides.LoadError;
+        if (SourceOverridesError is { } overridesError)
+            SessionJournal.Mark($"user override file IGNORED — {overridesError}");
         Audio = new AlertAudioService
         {
             Volume = Settings.AlertVolume,
@@ -121,9 +141,75 @@ public sealed class SourceManager : IDisposable
         // Archive collapse: whenever a mirror joins a fight, the archive
         // keeps only the primary copy (fires under Sync — correlator events
         // are raised inside Accept on the pump/restore path).
-        Correlator.Merged += History.CollapseToPrimary;
+        Correlator.Merged += OnFightMerged;
         // History views resync by polling Correlator.Version on the UI tick
         // — no event needed (the old HistoryChanged had zero subscribers).
+    }
+
+    // ── Fight consumers, each isolated ──────────────────────────────────────
+
+    private int _consumerFaults;
+
+    /// <summary>Everything that wants a finished fight, in the order the
+    /// old multicast ran it (correlator first, then archive, upload, raid
+    /// roster) — but each in its own guard. As chained delegates, the first
+    /// consumer to throw starved every one after it: a correlator or
+    /// archive fault cost the upload and the attendance feed as well, and
+    /// the throw then surfaced on the log pump as a failed LINE. One
+    /// handler for every source, so Remove can unsubscribe the same
+    /// delegate Add subscribed. Fires on the pump thread under Sync.</summary>
+    private void OnEncounterEnded(Core.Combat.Encounter encounter)
+    {
+        Isolated("correlator", encounter, Correlator.Accept);
+        Isolated("archive save", encounter, History.QueueSave);
+        Isolated("upload", encounter, Uploads.OnEncounterEnded);
+        Isolated("raid roster", encounter, OnEncounterEndedFeedRaid);
+    }
+
+    /// <summary>The archive collapse does SQLite work inside the
+    /// correlator's Merged event. Unguarded, a database error there
+    /// escaped through Accept — on the pump that skipped the line, and on
+    /// the startup restore path it would have failed the whole launch.</summary>
+    private void OnFightMerged(Core.Correlation.CorrelatedEncounter fight) =>
+        Isolated("archive collapse", fight, History.CollapseToPrimary);
+
+    /// <summary>Run one consumer; a throw becomes a crash report and a
+    /// journal line instead of propagating. The journal names the consumer
+    /// and the exception type only. Throttled past the first ten: a
+    /// consumer that is broken for good fails once per fight, and an
+    /// import ends thousands of fights.</summary>
+    private void Isolated<T>(string consumer, T argument, Action<T> action)
+    {
+        try
+        {
+            action(argument);
+        }
+        catch (Exception ex)
+        {
+            var faults = Interlocked.Increment(ref _consumerFaults);
+            CrashLog.Report("fight-consumer", ex, $"Consumer: {consumer}");
+            if (faults <= 10 || faults % 100 == 0)
+                SessionJournal.Mark($"fight consumer FAILED: {consumer} ({ex.GetType().Name}, {faults} this session)");
+        }
+    }
+
+    /// <summary>A trigger's regex ran past its match timeout and the engine
+    /// switched it off for the session (per source — each log has its own
+    /// engine, so this can fire once per log). Nobody was told: the alert
+    /// just stopped. Journal it and toast it. The journal names the
+    /// trigger by where it is filed; the pattern itself is added only for
+    /// Lexicon-pack triggers (public, curated content — and the one thing
+    /// a curator needs to fix it), never for one the user typed. Fires on
+    /// the pump thread under Sync.</summary>
+    private void OnTriggerTimedOut(Trigger trigger)
+    {
+        var filedUnder = trigger.Zone.Length > 0 ? $"{trigger.Zone} / {trigger.Category}" : trigger.Category;
+        var pattern = trigger.Source.Length > 0
+            ? $", pattern: {(trigger.RegexText.Length <= 200 ? trigger.RegexText : trigger.RegexText[..200] + "…")}"
+            : "";
+        SessionJournal.Mark(
+            $"trigger DISABLED for this session — regex match timed out ({(trigger.Source.Length > 0 ? trigger.Source : "user")} trigger, filed under: {filedUnder}{pattern})");
+        AnnounceNotification(Loc.Format("Sources_TriggerTooSlow", filedUnder));
     }
 
     public IReadOnlyList<LogSource> Sources
@@ -191,9 +277,14 @@ public sealed class SourceManager : IDisposable
             };
             lock (Sync)
             {
-                Correlator.Attach(source.Engine);
-                source.Engine.EncounterEnded += History.QueueSave;
-                source.Engine.EncounterEnded += Uploads.OnEncounterEnded;
+                // The owner is registered for the correlator's merge rule;
+                // its Accept runs from OnEncounterEnded with the other
+                // consumers (each isolated) rather than as a subscriber of
+                // its own.
+                Correlator.RegisterOwner(source.Owner);
+                source.Engine.EncounterEnded += OnEncounterEnded;
+                if (source.TriggerEngine is { } triggerEngine)
+                    triggerEngine.MatchTimedOut += OnTriggerTimedOut;
                 source.Processor.StatusApplied += Callouts.OnStatusApplied;
                 source.Processor.TriggerShared += SharedTriggers.OnShared;
                 // One handler per source, routed through the cross-source
@@ -203,7 +294,6 @@ public sealed class SourceManager : IDisposable
                 var raidHandler = MakeRaidLineHandler(source);
                 _raidHandlers[source] = raidHandler;
                 source.Processor.RaidLine += raidHandler;
-                source.Engine.EncounterEnded += OnEncounterEndedFeedRaid;
                 _sources.Add(source);
             }
             // Pump only once fully wired — starting in the LogSource
@@ -220,14 +310,16 @@ public sealed class SourceManager : IDisposable
         lock (Sync)
         {
             _sources.Remove(source);
-            Correlator.Detach(source.Engine);
-            source.Engine.EncounterEnded -= History.QueueSave;
-            source.Engine.EncounterEnded -= Uploads.OnEncounterEnded;
+            // The owner stays registered with the correlator, as it did
+            // after Detach: history from that owner still needs the owner
+            // rule for future merges.
+            source.Engine.EncounterEnded -= OnEncounterEnded;
+            if (source.TriggerEngine is { } triggerEngine)
+                triggerEngine.MatchTimedOut -= OnTriggerTimedOut;
             source.Processor.StatusApplied -= Callouts.OnStatusApplied;
             source.Processor.TriggerShared -= SharedTriggers.OnShared;
             if (_raidHandlers.Remove(source, out var raidHandler))
                 source.Processor.RaidLine -= raidHandler;
-            source.Engine.EncounterEnded -= OnEncounterEndedFeedRaid;
             _removedPaths.Add(source.Path);
         }
         if (source.TriggerEngine is { } engine)

@@ -1,3 +1,4 @@
+using EQ2Parser.App.Services;
 using Velopack;
 
 namespace EQ2Parser.App;
@@ -14,8 +15,26 @@ public static class Program
     {
         VelopackApp.Build().Run();
 
-        var app = new App();
-        app.InitializeComponent();
+        App app;
+        try
+        {
+            app = new App();
+            app.InitializeComponent();
+        }
+        catch (Exception ex)
+        {
+            // Building the Application (its resource dictionaries, the
+            // theme) failed — earlier than OnStartup, so neither CrashLog
+            // nor the journal is installed yet and the process would die
+            // with no report and no update check. Start the journal by
+            // hand so this launch reads as its own session, then take the
+            // same exit as a failure inside OnStartup. Only construction
+            // is guarded: app.Run() below hosts the whole session, and
+            // nothing that escapes it later is a STARTUP failure.
+            SessionJournal.Begin();
+            App.FailStartup(ex);
+            return; // unreachable — FailStartup exits the process
+        }
         app.Run();
     }
 }

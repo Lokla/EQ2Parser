@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.IO;
 using System.Reflection;
 using System.Text;
@@ -16,12 +17,34 @@ namespace EQ2Parser.App.Services;
 /// exception to the swallow rule: five UI exceptions inside a minute is a
 /// crash LOOP (a broken template re-throws per frame) — the app exits
 /// hard with a crash-loop report instead of wedging unclosable.
+///
+/// Failures that are CAUGHT where they happen but must still leave a stack
+/// trace (a log line the pump had to skip, a log reader that died) come in
+/// through <see cref="Report"/>, and a startup that threw through
+/// <see cref="ReportStartupFailure"/> — same folder, same format, their own
+/// kinds.
 /// </summary>
 public static class CrashLog
 {
     public static string Directory => Path.Combine(AppSettings.Directory, "crashes");
 
+    /// <summary>The kinds whose report is the process's last words. They
+    /// bypass the rate limit, and the next launch's postmortem reads them
+    /// as "this is why the session ended" (see SessionJournal).</summary>
+    internal const string FatalKind = "fatal";
+    internal const string CrashLoopKind = "crash-loop";
+    internal const string StartupKind = "fatal-startup";
+
+    private const string FilePrefix = "crash-";
+    private const string StampFormat = "yyyy-MM-dd_HHmmss";
+
     private const int KeepFiles = 30;
+
+    /// <summary>Serializes <see cref="Write"/>: reports now arrive from the
+    /// log pump threads as well as the UI thread and the finalizer, and two
+    /// writers inside the same second would otherwise both pass the rate
+    /// limit and race for one file name.</summary>
+    private static readonly object Gate = new();
     private static DateTime _lastWrite;
     private static DateTime _lastDialog;
 
@@ -49,7 +72,7 @@ public static class CrashLog
                 _uiStrikes.Dequeue();
             if (_uiStrikes.Count >= LoopStrikes)
             {
-                var loopPath = Write("crash-loop", e.Exception);
+                var loopPath = Write(CrashLoopKind, e.Exception);
                 _lastDialog = DateTime.MinValue; // the last words always show
                 ShowDialog("EQ2Parser hit the same error repeatedly and has to close.", e.Exception, loopPath);
                 Environment.Exit(70);
@@ -63,7 +86,7 @@ public static class CrashLog
         AppDomain.CurrentDomain.UnhandledException += (_, e) =>
         {
             var ex = e.ExceptionObject as Exception;
-            var path = Write("fatal", ex);
+            var path = Write(FatalKind, ex);
             if (ex is not null)
                 ShowDialog("EQ2Parser hit a fatal error and has to close.", ex, path);
         };
@@ -76,30 +99,103 @@ public static class CrashLog
         };
     }
 
+    /// <summary>A failure that was caught and handled where it happened
+    /// but still needs its stack trace on disk. Never throws; returns the
+    /// file written, or null when the rate limit (or the disk) swallowed
+    /// it. <paramref name="context"/> is printed above the exception — say
+    /// what was being done, and keep the token and anything like it out
+    /// (SECURITY.md). <paramref name="always"/> bypasses the rate limit:
+    /// only for reports that are bounded by construction (one per source
+    /// that stops), never for anything that can repeat per line.</summary>
+    public static string? Report(string kind, Exception ex, string? context = null, bool always = false) =>
+        Write(kind, ex, context, always);
+
+    /// <summary>App.OnStartup threw. The report is this launch's last
+    /// words, so it always lands.</summary>
+    public static string? ReportStartupFailure(Exception ex) => Write(StartupKind, ex);
+
+    /// <summary>Tell the user the launch failed — once, and regardless of
+    /// the dialog rate limit: the process exits right after, so this is
+    /// the only explanation they will get.</summary>
+    public static void ShowStartupFailure(Exception ex, string? reportPath)
+    {
+        _lastDialog = DateTime.MinValue; // the last words always show
+        ShowDialog("EQ2Parser could not start and has to close.", ex, reportPath);
+    }
+
+    /// <summary>True for the kinds that end the process.</summary>
+    internal static bool EndsProcess(string kind) => kind is FatalKind or CrashLoopKind or StartupKind;
+
+    /// <summary>Reads a report's file name back into when it was written
+    /// (local time, whole seconds) and its kind — the postmortem uses this
+    /// to tell which reports belong to the session that died. Tolerates the
+    /// "-2" a same-second sibling gets.</summary>
+    internal static bool TryParseReportName(string fileName, out DateTime written, out string kind)
+    {
+        written = default;
+        kind = "";
+        var name = Path.GetFileNameWithoutExtension(fileName);
+        // crash-<stamp>-<kind>, with at least one character of kind.
+        if (!name.StartsWith(FilePrefix, StringComparison.Ordinal)
+            || name.Length < FilePrefix.Length + StampFormat.Length + 2
+            || name[FilePrefix.Length + StampFormat.Length] != '-')
+            return false;
+        if (!DateTime.TryParseExact(
+                name.AsSpan(FilePrefix.Length, StampFormat.Length), StampFormat,
+                CultureInfo.InvariantCulture, DateTimeStyles.None, out written))
+            return false;
+        kind = name[(FilePrefix.Length + StampFormat.Length + 1)..];
+        var lastDash = kind.LastIndexOf('-');
+        if (lastDash > 0 && lastDash < kind.Length - 1 && kind.AsSpan(lastDash + 1).IndexOfAnyExceptInRange('0', '9') < 0)
+            kind = kind[..lastDash];
+        return true;
+    }
+
+    /// <summary>Test seam: forget the last write so a test's report is not
+    /// swallowed by the rate limit of the test before it.</summary>
+    internal static void ResetRateLimit()
+    {
+        lock (Gate)
+        {
+            _lastWrite = default;
+        }
+    }
+
     /// <summary>Never throws — the crash logger crashing is the one
     /// failure mode this class exists to prevent. Rate-limited so an
     /// exception storm (per-frame render errors) can't flood the disk.</summary>
-    private static string? Write(string kind, Exception? ex)
+    private static string? Write(string kind, Exception? ex, string? context = null, bool always = false)
     {
         try
         {
-            var now = DateTime.Now;
-            // The rate limit tames exception storms — but the FATAL and
-            // CRASH-LOOP reports are the process's last words and must
-            // always land, even when a storm preceded them.
-            if (kind is not ("fatal" or "crash-loop") && now - _lastWrite < TimeSpan.FromSeconds(5))
-                return null;
-            _lastWrite = now;
-            System.IO.Directory.CreateDirectory(Directory);
-            Prune();
-            var path = Path.Combine(Directory, $"crash-{now:yyyy-MM-dd_HHmmss}-{kind}.txt");
-            var report = new StringBuilder()
-                .AppendLine($"EQ2Parser {Version} — {kind} exception at {now:yyyy-MM-dd HH:mm:ss}")
-                .AppendLine($"{Environment.OSVersion} · .NET {Environment.Version}")
-                .AppendLine()
-                .Append(ex?.ToString() ?? "(no exception object)");
-            File.WriteAllText(path, report.ToString());
-            return path;
+            lock (Gate)
+            {
+                var now = DateTime.Now;
+                // The rate limit tames exception storms — but the FATAL and
+                // CRASH-LOOP reports are the process's last words and must
+                // always land, even when a storm preceded them.
+                if (!always && !EndsProcess(kind) && now - _lastWrite < TimeSpan.FromSeconds(5))
+                    return null;
+                _lastWrite = now;
+                System.IO.Directory.CreateDirectory(Directory);
+                Prune();
+                // Two reports of one kind inside one second (several log
+                // sources dying together when a drive drops) must not
+                // overwrite each other.
+                var stem = FilePrefix + now.ToString(StampFormat, CultureInfo.InvariantCulture) + "-" + kind;
+                var path = Path.Combine(Directory, stem + ".txt");
+                for (var n = 2; File.Exists(path) && n < 100; n++)
+                    path = Path.Combine(Directory, $"{stem}-{n}.txt");
+                var report = new StringBuilder()
+                    .AppendLine($"EQ2Parser {Version} — {kind} exception at {now:yyyy-MM-dd HH:mm:ss}")
+                    .AppendLine($"{Environment.OSVersion} · .NET {Environment.Version}")
+                    .AppendLine();
+                if (!string.IsNullOrEmpty(context))
+                    report.AppendLine(context).AppendLine();
+                report.Append(ex?.ToString() ?? "(no exception object)");
+                File.WriteAllText(path, report.ToString());
+                return path;
+            }
         }
         catch
         {

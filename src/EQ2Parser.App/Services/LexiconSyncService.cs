@@ -54,9 +54,10 @@ public sealed class LexiconSyncService
 
     private string? _status;
 
-    /// <summary>Lazy default: this service is constructed before
-    /// Loc.Initialize runs, so the not-synced-yet line resolves at read
-    /// time rather than at construction.</summary>
+    /// <summary>Lazy default: the not-synced-yet line resolves at read
+    /// time rather than at construction. The app builds this service
+    /// after Loc.Initialize, but tests construct it without ever calling
+    /// Loc.Initialize.</summary>
     public string Status => _status ?? Loc.Get("LexiconSvc_NotSyncedYet");
 
     /// <summary>Raised (on whatever thread) whenever Status changes.</summary>

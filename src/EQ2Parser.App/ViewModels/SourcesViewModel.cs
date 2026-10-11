@@ -93,15 +93,26 @@ public sealed partial class SourcesViewModel(SourceManager manager) : Observable
         lock (manager.Sync)
         {
             for (var i = 0; i < Rows.Count; i++)
-            {
-                var row = Rows[i];
-                statuses[i] = row.Source.Error is not null
-                    ? $"error: {row.Source.Error.Message}"
-                    : $"{row.Source.Processor.LinesSeen:N0} lines · {row.Source.Processor.LinesMatched:N0} matched · {row.Source.Engine.History.Count} encounters{(row.Source.Engine.InCombat ? " · IN COMBAT" : "")}";
-            }
+                statuses[i] = StatusFor(Rows[i].Source);
         }
         for (var i = 0; i < Rows.Count && i < statuses.Length; i++)
             Rows[i].Status = statuses[i];
+    }
+
+    /// <summary>One source's status line. The caller holds the manager's
+    /// Sync lock (engine state is read). "error:" means the tail has
+    /// STOPPED. A source that only had to skip lines is still reading, so
+    /// its skips ride on the end of the normal counters instead — calling
+    /// it dead would send the user off to re-add a log that is working.</summary>
+    internal static string StatusFor(LogSource source)
+    {
+        if (source.Error is { } error)
+            return $"error: {error.Message}";
+        var skipped = source.SkippedLines;
+        return $"{source.Processor.LinesSeen:N0} lines · {source.Processor.LinesMatched:N0} matched · {source.Engine.History.Count} encounters{(source.Engine.InCombat ? " · IN COMBAT" : "")}"
+            + (skipped > 0
+                ? $" · {skipped:N0} skipped on error (last: {source.LastLineError?.GetType().Name}) — see the crashes folder"
+                : "");
     }
 
     public void SyncFromManager()
