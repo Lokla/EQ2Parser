@@ -13,6 +13,11 @@ namespace EQ2Parser.App.Tests;
 public sealed class UploadServiceRaidOnlyTests : IDisposable
 {
     private readonly TestDataDir _dir = new();
+
+    // Every client a service here builds talks to this in-process site.
+    // Without it Configure's whoami probe went out through a real
+    // HttpClient: a background DNS lookup of a reserved host name per test.
+    private readonly FakeLexiconSite _site = new();
     private static readonly DateTimeOffset T0 = DateTimeOffset.FromUnixTimeSeconds(1_775_000_000);
 
     public UploadServiceRaidOnlyTests()
@@ -48,17 +53,29 @@ public sealed class UploadServiceRaidOnlyTests : IDisposable
             });
     }
 
-    private static UploadService Configured(bool raidOnly, int players, bool withBosses = true)
+    private UploadService Configured(bool raidOnly, int players, bool withBosses = true)
     {
         var svc = new UploadService
         {
+            HandlerFactory = _site.NewHandler,
             PlayerCounter = _ => players,
             RaidBosses = withBosses ? new RaidBossSyncService("https://example.test", new HttpClient(new CannedHandler())) : null,
         };
-        // A token + https URL make the service Active; nothing is sent
+        // A token + https URL make the service Active; no fight is sent
         // because these tests only consult the gate, never Enqueue.
         svc.Configure("https://example.test", "token", enabled: true, raidOnly: raidOnly);
         return svc;
+    }
+
+    [Fact]
+    public async Task The_Service_Under_Test_Talks_To_The_Fake_Site_Only()
+    {
+        // Configure fires a whoami probe at once. It arriving HERE is the
+        // proof the client was built over the fake's handler; a client
+        // built without it would have sent the probe to the network.
+        using var svc = Configured(raidOnly: true, players: 3);
+        await FakeLexiconSite.WaitFor(() => _site.OtherRequests >= 1, "the whoami probe reaching the fake site");
+        Assert.Empty(_site.Ingested); // and the gate tests upload nothing
     }
 
     [Fact]
@@ -97,7 +114,7 @@ public sealed class UploadServiceRaidOnlyTests : IDisposable
     [Fact]
     public void Disabled_Uploads_Never_Pass_Regardless_Of_Rule()
     {
-        using var svc = new UploadService { PlayerCounter = _ => 24 };
+        using var svc = new UploadService { HandlerFactory = _site.NewHandler, PlayerCounter = _ => 24 };
         svc.Configure("https://example.test", "token", enabled: false, raidOnly: true);
         Assert.False(svc.ShouldAutoUpload(Fight("Trakanon")));
         Assert.Equal(0, svc.SkippedNonRaid);

@@ -1,3 +1,5 @@
+using System.Text.RegularExpressions;
+
 namespace EQ2Parser.Core.Upload;
 
 /// <summary>
@@ -6,8 +8,39 @@ namespace EQ2Parser.Core.Upload;
 /// plugin's LogPathParser so both uploaders stamp identical logger_server
 /// values on their payloads.
 /// </summary>
-public static class LogPaths
+public static partial class LogPaths
 {
+    /// <summary>The shape of a server name the site accepts as
+    /// <c>logger_server</c>: a letter, then up to 30 more characters, each a
+    /// letter, a digit, a space, an apostrophe, an underscore or a hyphen —
+    /// 1 to 31 characters, ASCII only, either case. Mirrors
+    /// <c>WORLD_NAME_RE</c> in EQ2Lexicon's
+    /// <c>backend/server/core/validation.py</c>, character for character;
+    /// change both together. The site applies it through
+    /// <c>sanitize_world</c> (same module), which strips surrounding
+    /// whitespace first — that is what makes the trailing <c>$</c> mean the
+    /// end of the name on both sides — and <c>ingest_parse</c>
+    /// (<c>backend/server/api/parses/ingest.py</c>) answers 400
+    /// "logger_server '…' is malformed." to a name that fails it. The
+    /// attendance ingest and the raid-mains lookup gate on the same
+    /// function. The length here is the PATTERN's: the request model's own
+    /// <c>max_length</c> on the field has been a different number.</summary>
+    public const string ServerNamePattern = @"^[A-Za-z][A-Za-z0-9 '_-]{0,30}$";
+
+    [GeneratedRegex(ServerNamePattern, RegexOptions.CultureInvariant)]
+    private static partial Regex ServerNameShape();
+
+    /// <summary>Whether the site would accept <paramref name="serverName"/>
+    /// as a <c>logger_server</c> shape (see <see cref="ServerNamePattern"/>;
+    /// whitespace around it is ignored, as the site ignores it). False for
+    /// null, empty and blank. This is the SHAPE only — whether the server is
+    /// one the site tracks is its allow-list's decision, made per upload. A
+    /// log folder whose name fails this (it starts with a digit, holds a
+    /// character outside the set, or runs past 31) can only be answered
+    /// with a 400, every fight, so callers do not send for it.</summary>
+    public static bool IsServerNameAccepted(string? serverName) =>
+        serverName is not null && ServerNameShape().IsMatch(serverName.Trim());
+
     /// <summary>
     /// EQ2 server name from a log path — the log's parent directory name.
     /// Returns "" when the path doesn't match the per-server layout — the
@@ -20,8 +53,9 @@ public static class LogPaths
     /// skips the fight and tells the user why, and UploadQueue.Enqueue drops
     /// an empty server as the backstop. Server names with spaces
     /// ("Antonia Bayle") pass through unmodified. A log in any other folder
-    /// yields that folder's name, whatever it is; the site's allow-list
-    /// decides whether that is a server it accepts.
+    /// yields that folder's name, whatever it is: <see cref="IsServerNameAccepted"/>
+    /// says whether the site would take it as a server name at all, and the
+    /// site's allow-list decides whether it is a server it accepts.
     /// </summary>
     public static string ParseServerName(string? logPath)
     {

@@ -16,10 +16,15 @@ public class EnglishGrammarTotalityTests
         Assert.IsType<SwingEvent>(EnglishGrammar.TryParse(message));
 
     [Theory]
-    // The amount pattern is [\d,]+ — commas alone satisfy it.
+    // An amount starts with a digit: commas alone are not one …
     [InlineData(",")]
     [InlineData(",,,")]
     [InlineData(",K")]
+    // … and neither is a number behind a leading comma (",5" once read as 5).
+    [InlineData(",5")]
+    [InlineData(",5K")]
+    [InlineData(",,7.5M")]
+    [InlineData(",1,000")]
     // 20 digits: inside decimal's range, past long's.
     [InlineData("99999999999999999999")]
     [InlineData("99,999,999,999,999,999,999")]
@@ -35,6 +40,16 @@ public class EnglishGrammarTotalityTests
     [InlineData("70000000000000000000000000000B")]
     // \d admits every Unicode decimal digit; the number parser only ASCII.
     [InlineData("١٢٣")]
+    // Fits a long, but past the plausibility ceiling (EnglishGrammar.MaxAmount):
+    // the largest long itself, written plainly and with a suffix …
+    [InlineData("9223372036854775807")]
+    [InlineData("9223372036854775.807K")]
+    // … and the first amounts over the ceiling, in each form.
+    [InlineData("10,000,000,000,001")]
+    [InlineData("10000000000001")]
+    [InlineData("10,000,000,000.001K")]
+    [InlineData("10,000,001M")]
+    [InlineData("10,001B")]
     public void Unrepresentable_Amount_Is_A_Non_Match_On_Every_Shape(string amount)
     {
         string[] lines =
@@ -75,9 +90,15 @@ public class EnglishGrammarTotalityTests
     [InlineData("3M", 3_000_000L)]
     [InlineData("1.5B", 1_500_000_000L)]
     [InlineData("2,000B", 2_000_000_000_000L)]
-    // The largest amounts that still fit — the edge of the guard above.
-    [InlineData("9223372036854775807", long.MaxValue)]
-    [InlineData("9223372036854775.807K", long.MaxValue)]
+    // The largest amounts that still parse — the edge of the plausibility
+    // ceiling (EnglishGrammar.MaxAmount), in each form. The first amounts
+    // past it are rows of the theory above.
+    [InlineData("10,000,000,000,000", EnglishGrammar.MaxAmount)]
+    [InlineData("10000000000000", EnglishGrammar.MaxAmount)]
+    [InlineData("10,000,000,000K", EnglishGrammar.MaxAmount)]
+    [InlineData("10,000,000M", EnglishGrammar.MaxAmount)]
+    [InlineData("10,000B", EnglishGrammar.MaxAmount)]
+    [InlineData("9,999,999,999,999.4", 9_999_999_999_999L)]
     public void Ordinary_Amounts_Of_Every_Form_Still_Parse(string amount, long expected)
     {
         Assert.Equal(expected, Swing($"YOUR Oak Strike hits a training dummy for {amount} crushing damage.").Damage.Number);
@@ -119,6 +140,55 @@ public class EnglishGrammarTotalityTests
         var encounter = engine.History[^1];
         Assert.Equal(750, encounter.Combatants["ALDER"].Damage);
         Assert.False(encounter.Combatants.ContainsKey("BIRCH"));
+    }
+
+    [Fact]
+    public void The_Ceiling_Leaves_Room_For_Nine_Hundred_Thousand_Amounts_In_One_Total()
+    {
+        // Pinned, because both halves of its justification are arithmetic
+        // on this number: ten times the largest amount the game's K/M/B
+        // notation is seen to write (999.9B), and far enough under a long
+        // that no total a fight keeps can wrap.
+        Assert.Equal(10_000_000_000_000L, EnglishGrammar.MaxAmount);
+        Assert.True(long.MaxValue / EnglishGrammar.MaxAmount > 900_000);
+    }
+
+    [Fact]
+    public void Forged_Amounts_Cannot_Wrap_A_Total_Or_Break_A_Checked_Sum()
+    {
+        // A custom emote can be shaped like a damage line. With no ceiling,
+        // two of them carrying the largest long wrapped the attacker's total
+        // negative, and any checked sum over the swings threw.
+        const int forged = 5_000;
+        var engine = new Engine.ParserEngine("log", "Alder");
+        var processor = new Engine.LogLineProcessor(engine);
+        var second = 1779270720L;
+        void Feed(string message)
+        {
+            Assert.True(Logs.LogLine.TryParse($"({second++})[Wed May 20 10:52:00 2026] {message}", out var line));
+            processor.Process(line);
+        }
+
+        Feed("YOU hit a training dummy for 500 crushing damage.");
+        // Over the ceiling: not lines the grammar knows.
+        Feed("Birch hits a training dummy for 9223372036854775807 crushing damage.");
+        Feed("Birch hits a training dummy for 9223372036854775807 crushing damage.");
+        Feed("Birch's Oak Mending heals Alder for 9223372036854775.807K hit points.");
+        Assert.Equal(1, processor.LinesMatched);
+        // AT the ceiling, thousands of times over: still an exact total.
+        for (var i = 0; i < forged; i++)
+            Feed("Birch hits a training dummy for 10,000B crushing damage.");
+        engine.EndCombat();
+
+        var encounter = engine.History[^1];
+        var birch = encounter.Combatants["BIRCH"];
+        var swings = birch.OutgoingBuckets[BucketConfig.OutgoingDamage].All.Swings;
+        Assert.Equal(forged, swings.Count);
+        Assert.Equal(forged * EnglishGrammar.MaxAmount, birch.Damage);
+        Assert.Equal(birch.Damage, swings.Sum(s => s.Damage.Number)); // Enumerable.Sum is checked
+        Assert.Equal(0, birch.Healed);
+        Assert.Equal(forged * EnglishGrammar.MaxAmount + 500, encounter.Damage);
+        Assert.True(encounter.EncDps > 0);
     }
 
     [Theory]

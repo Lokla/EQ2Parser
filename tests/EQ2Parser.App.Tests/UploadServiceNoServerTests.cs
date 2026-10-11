@@ -107,10 +107,16 @@ public sealed class UploadServiceNoServerTests : IDisposable
         _site.Refusals["Varsoon"] = (HttpStatusCode.Unauthorized, null, "Invalid or revoked token");
         using var svc = _site.NewService();
         svc.OnEncounterEnded(FakeLexiconSite.Fight(VarsoonLog));
-        await FakeLexiconSite.WaitFor(() => svc.Status.Contains("paused"), "the pause");
+        // The state, not a word in the (translated) status line. The line
+        // is waited for as well — it is published a moment after the state
+        // — so it cannot land on top of the refusal asserted next.
+        await FakeLexiconSite.WaitFor(
+            () => svc.UploadsPaused && svc.Status == EQ2Parser.App.Localization.Loc.Format("UploadQ_PausedTokenRejected", 401),
+            "the pause");
 
         svc.UploadFight([FakeLexiconSite.Fight(LegacyLog)]);
         Assert.Contains("not inside a server folder", svc.Status);
+        Assert.True(svc.UploadsPaused);
         svc.OnEncounterEnded(FakeLexiconSite.Fight(VarsoonLog));
         await Task.Delay(100);
         Assert.Single(_site.Ingested); // still paused

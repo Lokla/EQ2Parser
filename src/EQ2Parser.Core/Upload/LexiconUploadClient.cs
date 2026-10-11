@@ -17,7 +17,33 @@ namespace EQ2Parser.Core.Upload;
 /// signed upload, trimmed; "" when the header is absent or blank. A
 /// machine code for the queue's pause decision — never shown to the user
 /// (the <c>detail</c> in <paramref name="Message"/> is the human text).</param>
-public sealed record UploadResult(bool Success, int StatusCode, string Message, string Body = "", string RejectCode = "");
+public sealed record UploadResult(bool Success, int StatusCode, string Message, string Body = "", string RejectCode = "")
+{
+    /// <summary>How long the site asked the client to wait before trying
+    /// again (the <c>Retry-After</c> response header on a failed signed
+    /// upload), or null when it sent none or one that cannot be used — see
+    /// <see cref="LexiconUploadClient.ReadRetryAfter"/>. Unclamped: the
+    /// reader (<see cref="UploadQueue.RateLimitWait"/>) bounds it.</summary>
+    public TimeSpan? RetryAfter { get; init; }
+
+    /// <summary>The site's own <c>status</c> word on a successful signed
+    /// upload ("inserted", "skipped", "quarantined"); "" when there is none.
+    /// Kept apart from <see cref="Message"/> so a status line can be written
+    /// around it in the user's language.</summary>
+    public string ServerStatus { get; init; } = "";
+
+    /// <summary>True when NOTHING was sent because there is no client to
+    /// send with (no saved token, or a site address the client refuses).
+    /// Not a transport failure: retrying cannot help until the user changes
+    /// the configuration, so <see cref="UploadQueue"/> drops the upload at
+    /// once instead of walking its retry waits.</summary>
+    public bool NotConfigured { get; init; }
+
+    /// <summary>The outcome of a send that had no client to go through;
+    /// <paramref name="reason"/> is the user-facing why (never a credential
+    /// — there is none to name).</summary>
+    public static UploadResult NoClient(string reason) => new(false, 0, reason) { NotConfigured = true };
+}
 
 /// <summary>
 /// HTTP client for the EQ2Lexicon site — the exact transport contract the
@@ -132,10 +158,13 @@ public sealed class LexiconUploadClient : IDisposable
                     (int)response.StatusCode,
                     ExtractDetail(body) ?? $"Server responded {(int)response.StatusCode}",
                     body,
-                    ReadRejectCode(response));
+                    ReadRejectCode(response))
+                {
+                    RetryAfter = ReadRetryAfter(response.Headers.RetryAfter, DateTimeOffset.UtcNow),
+                };
             }
             var status = ExtractField(body, "status") ?? "ok";
-            return new UploadResult(true, (int)response.StatusCode, $"Uploaded ({status}).", body);
+            return new UploadResult(true, (int)response.StatusCode, $"Uploaded ({status}).", body) { ServerStatus = status };
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
@@ -227,6 +256,43 @@ public sealed class LexiconUploadClient : IDisposable
         response.Headers.TryGetValues(RejectHeader, out var values)
             ? values.Select(v => v.Trim()).FirstOrDefault(v => v.Length > 0) ?? ""
             : "";
+
+    /// <summary>A <c>Retry-After</c> header as a wait from
+    /// <paramref name="now"/>, in either form HTTP allows: delta-seconds
+    /// ("30") or an HTTP-date. Null when the header is absent, does not
+    /// parse (the typed header is null then), or names a date that is not
+    /// in the future — a past date is more likely a skewed clock than
+    /// "retry at once", so it reads as no answer and the caller's own wait
+    /// applies. The value is NOT clamped here.
+    ///
+    /// Which of the site's 429s carry it (EQ2Lexicon, read 2026-10):
+    ///   * The per-token limit on parse ingest (60 a minute, the slowapi
+    ///     <c>@limiter.limit</c> on <c>ingest_parse</c>) does NOT. It is
+    ///     answered by <c>_rate_limit_handler</c> in
+    ///     <c>backend/server/app.py</c> with slowapi's stock response, and
+    ///     the limiter in <c>backend/server/limiter.py</c> is built without
+    ///     <c>headers_enabled</c>, so no header is injected. Its body has
+    ///     an <c>error</c> key and no <c>detail</c>.
+    ///   * The per-client flood budget (<c>_client_flood_gate</c> in
+    ///     <c>backend/server/api/parses/ingest.py</c>, counted by
+    ///     <c>backend/server/core/client_throttle.py</c>) DOES, as
+    ///     delta-seconds of at least 1 (<c>ThrottleVerdict.retry_after</c>),
+    ///     and <c>_http_exception_handler</c> keeps the header. It applies
+    ///     only to a User-Agent prefix named in INGEST_CLIENT_LIMITS; the
+    ///     default names none of this client's, so it reaches the parser
+    ///     only when the site configures one.
+    /// A proxy in front of the site may add either form on its own
+    /// 429 or 503.</summary>
+    public static TimeSpan? ReadRetryAfter(RetryConditionHeaderValue? header, DateTimeOffset now)
+    {
+        if (header is null)
+            return null;
+        if (header.Delta is { } delta)
+            return delta >= TimeSpan.Zero ? delta : null;
+        if (header.Date is { } date && date > now)
+            return date - now;
+        return null;
+    }
 
     private static string? ExtractDetail(string body) => ExtractField(body, "detail");
 

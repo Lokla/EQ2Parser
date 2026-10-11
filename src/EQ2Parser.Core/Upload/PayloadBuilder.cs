@@ -26,6 +26,8 @@ public static class PayloadBuilder
         foreach (var combatant in encounter.Combatants.Values.OrderByDescending(c => c.Damage))
         {
             var isAlly = allyKeys.Contains(combatant.Key);
+            if (!isAlly && !HasUploadedSwing(combatant))
+                continue; // exists only through swings the upload leaves out — see HasUploadedSwing
             var outgoingDamage = combatant.OutgoingBuckets.GetValueOrDefault(BucketConfig.OutgoingDamage)?.All;
             var healedOut = combatant.OutgoingBuckets.GetValueOrDefault(BucketConfig.HealedOut)?.All;
             var personalSeconds = combatant.Duration.TotalSeconds;
@@ -209,6 +211,45 @@ public static class PayloadBuilder
     /// replenish) and 16 (threat) included.</summary>
     private static bool IsUploaded(SwingCategory category) => category != SwingCategory.StatusEffect;
 
+    /// <summary>Whether the combatant made or received at least one swing
+    /// of a category the upload carries. A combatant comes to exist in one
+    /// way only: <see cref="Encounter.AddSwing"/> creates the attacker and
+    /// the victim of a swing, and files that swing in the attacker's
+    /// outgoing reference bucket and the victim's incoming one. So those
+    /// two buckets hold every swing a combatant has, and one that has none
+    /// in an uploaded category exists ONLY because of swings that are not
+    /// uploaded: the anonymous "Unknown" attacker of "X is stunned!" (every
+    /// figure zero on the site's parse page), a mob that was only ever
+    /// stunned, a name that only ever silenced something. Its row is left
+    /// out of the upload; it stays a combatant of the encounter, so local
+    /// history, ability mining and the encid seed (which counts the
+    /// encounter's combatants) are untouched.
+    ///
+    /// Nothing can be orphaned by this: damage_types rows come from the
+    /// category-linked buckets and attack rows from uploaded categories, so
+    /// a combatant with either has an uploaded swing and keeps its row. A
+    /// combatant with zero damage who healed, was healed, was hit, was
+    /// attacked and avoided it, died or cured has one too. Allies are never
+    /// tested — in practice that is the log owner, who is their own ally
+    /// without having interacted with anyone. And a payload cannot end up
+    /// with no combatants: only a hostile swing starts an encounter, and
+    /// both its ends pass.</summary>
+    private static bool HasUploadedSwing(Combatant combatant) =>
+        AnyUploaded(combatant.OutgoingBuckets, BucketConfig.AllOutgoingRef)
+        || AnyUploaded(combatant.IncomingBuckets, BucketConfig.AllIncomingRef);
+
+    private static bool AnyUploaded(IReadOnlyDictionary<string, Bucket> side, string referenceBucket)
+    {
+        if (!side.TryGetValue(referenceBucket, out var reference))
+            return false;
+        foreach (var swing in reference.All.Swings)
+        {
+            if (IsUploaded(swing.Category))
+                return true;
+        }
+        return false;
+    }
+
     /// <summary>The site's Cures tab reads a cure row's damage as the number
     /// of effects removed, hits as times cast and maxhit as the most at
     /// once, and ACT books each cure line as an amount of 1. The engine's
@@ -257,12 +298,6 @@ public static class PayloadBuilder
         };
     }
 
-    /// <summary>The grammar's damage-type marker on a threat REDUCTION
-    /// ("… reduces THEIR hate with …"); an increase carries "threat". The
-    /// amount is positive either way, so this marker is the only thing
-    /// that tells the two apart.</summary>
-    private const string ThreatReduceType = "threat-reduce";
-
     /// <summary>ACT's type text for a row (the wire's <c>resist</c>), or
     /// null when the row's swings do not agree on one. The site keys one
     /// row per (attacker, swingtype, name), so a heal ability that also
@@ -282,7 +317,9 @@ public static class PayloadBuilder
             var text = category switch
             {
                 SwingCategory.Healing => swing.DamageType == EnglishGrammar.WardAbsorbType ? "Absorption" : "Hitpoints",
-                SwingCategory.Threat => swing.DamageType == ThreatReduceType ? "Decrease" : "Increase",
+                // The amount is positive either way; the grammar's marker
+                // is the only thing that tells a reduction from an increase.
+                SwingCategory.Threat => swing.DamageType == EnglishGrammar.ThreatReduceType ? "Decrease" : "Increase",
                 SwingCategory.PowerReplenish => "Power",
                 SwingCategory.Melee or SwingCategory.NonMelee =>
                     swing.Damage.Number > 0 && swing.DamageType.Length > 0 ? swing.DamageType : null,
@@ -299,7 +336,10 @@ public static class PayloadBuilder
     }
 
     /// <summary>Stable 8-hex content id: same fight → same id → server-side
-    /// dedupe on re-upload (UNIQUE(world, act_encid)).</summary>
+    /// dedupe on re-upload (UNIQUE(world, act_encid)). The seed reads the
+    /// ENCOUNTER only — its combatant count is every combatant of the
+    /// fight, including one whose row <see cref="Build"/> leaves out — so
+    /// what the payload carries can change without moving the id.</summary>
     public static string ComputeEncId(Encounter encounter)
     {
         var seed = new StringBuilder()

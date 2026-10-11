@@ -15,7 +15,16 @@ namespace EQ2Parser.App.Services;
 public sealed class UploadService : IDisposable
 {
     private readonly UploadQueue _queue;
-    private LexiconUploadClient? _client;
+
+    // Read on the queue's drain thread (SendAsync) and written on the UI
+    // thread (Configure) — always by ONE assignment per reconfigure, so a
+    // send sees the old client or the new one, never a null in between.
+    private volatile LexiconUploadClient? _client;
+
+    // Why there is no client, in the user's words, for the queue's status
+    // line when a queued fight meets one. Only meaningful while _client is
+    // null; written just before it.
+    private volatile string _noClientReason = "";
     private volatile bool _enabled;
     private volatile bool _raidOnly;
 
@@ -36,10 +45,28 @@ public sealed class UploadService : IDisposable
     /// put on the upload, and the site refuses one without it.</summary>
     public int SkippedNoServer { get; private set; }
 
+    /// <summary>Fights skipped this session by the auto path because their
+    /// log IS in a folder under logs/, but the folder's name is not one the
+    /// site accepts as a server name
+    /// (<see cref="LogPaths.IsServerNameAccepted"/>) — it would answer 400
+    /// "malformed" to every one of them.</summary>
+    public int SkippedServerName { get; private set; }
+
     /// <summary>Fights the queue did not send this session because the site
     /// had already refused their server as not on its allow list — see
     /// <see cref="UploadQueue.SkippedRefusedServer"/>.</summary>
     public int SkippedRefusedServer => _queue.SkippedRefusedServer;
+
+    /// <summary>Queued fights dropped this session because the token was
+    /// cleared (or the site address refused) before they were sent — see
+    /// <see cref="UploadQueue.SkippedNotConfigured"/>.</summary>
+    public int SkippedNotConfigured => _queue.SkippedNotConfigured;
+
+    /// <summary>The queue has stopped sending because the site rejected the
+    /// token or its account (<see cref="UploadQueue.AuthPaused"/>). The
+    /// state, for code and tests — the status line's wording is translated
+    /// and must not be searched for it.</summary>
+    public bool UploadsPaused => _queue.AuthPaused;
 
     /// <summary>Test seam: the handler behind each client
     /// <see cref="Configure"/> builds (one per call — a client disposes its
@@ -48,7 +75,9 @@ public sealed class UploadService : IDisposable
 
     public UploadService()
     {
-        _queue = new UploadQueue(SendAsync, ProbeProvenance);
+        // The queue lives in Core and speaks English on its own; here it
+        // gets the app's translated lines (UploadQ_* keys).
+        _queue = new UploadQueue(SendAsync, ProbeProvenance) { Messages = LocalizedUploadMessages.Instance };
         _queue.StatusChanged += () => Set(_queue.Status);
     }
 
@@ -79,10 +108,15 @@ public sealed class UploadService : IDisposable
         StatusChanged?.Invoke();
     }
 
+    /// <summary>The queue's transport. With no client (no saved token, or a
+    /// site address the client refuses) nothing is sent and the outcome
+    /// says so as itself — <see cref="UploadResult.NotConfigured"/> — not
+    /// as status 0, which the queue reads as a network error and retries
+    /// through its 5 s and 30 s waits for every fight still queued.</summary>
     private Task<UploadResult> SendAsync(LexiconPayload payload, CancellationToken ct) =>
         _client is { } client
             ? client.UploadAsync(payload, ct)
-            : Task.FromResult(new UploadResult(false, 0, Loc.Get("UploadSvc_NoTokenConfigured")));
+            : Task.FromResult(UploadResult.NoClient(_noClientReason));
 
     public void Configure(string baseUrl, string? apiToken, bool enabled, bool raidOnly = false)
     {
@@ -90,34 +124,57 @@ public sealed class UploadService : IDisposable
         _raidOnly = raidOnly;
         if (enabled && raidOnly && RaidBosses is { } bosses)
             _ = bosses.EnsureFreshAsync(DateTimeOffset.Now);
+
+        LexiconUploadClient? client = null;
+        var noClientReason = "";
+        var noClientStatus = "";
+        if (string.IsNullOrWhiteSpace(apiToken))
+        {
+            noClientReason = Loc.Get("UploadSvc_NoTokenConfigured");
+            noClientStatus = enabled ? Loc.Get("UploadSvc_NoTokenSaveBelow") : "";
+        }
+        else if (LexiconUploadClient.UrlProblem(baseUrl) is { } problem)
+        {
+            noClientReason = problem;
+            noClientStatus = problem;
+        }
+        else
+        {
+            client = new LexiconUploadClient(baseUrl, apiToken, HandlerFactory?.Invoke());
+        }
+
         // The old client is dropped, not disposed — an in-flight send may
         // still hold it, and the queue treats a disposed-client throw as a
         // plain failure anyway. Reconfigures are rare; the GC collects it.
-        _client = null;
-        if (string.IsNullOrWhiteSpace(apiToken))
+        // One assignment: a send on the drain thread must never meet a
+        // null that only exists halfway through a token change, because a
+        // null now drops the fight instead of retrying it. The reason is
+        // written first, and only when there is no client, so a send that
+        // finds no client always finds the reason that goes with it.
+        if (client is null)
+            _noClientReason = noClientReason;
+        _client = client;
+        // AFTER the swap (UploadQueue.ConfigurationChanged says why): a new
+        // generation, so whatever a send still in flight on the old client
+        // comes back with cannot pause the queue or mark a server refused
+        // against the new token or site. It also clears both. A "server
+        // not allowed" answer and a pause belong to the site and account
+        // they came from, and Configure cannot tell a changed token or URL
+        // from a flipped toggle (it never keeps the token to compare), so
+        // every reconfigure forgets — the cost of forgetting too often is
+        // one refused request, then the skip or the pause resumes.
+        _queue.ConfigurationChanged();
+
+        if (client is null)
         {
             SetAttendanceAccess(null);
-            Set(enabled ? Loc.Get("UploadSvc_NoTokenSaveBelow") : "");
+            Set(noClientStatus);
             return;
         }
-        if (LexiconUploadClient.UrlProblem(baseUrl) is { } problem)
-        {
-            SetAttendanceAccess(null);
-            Set(problem);
-            return;
-        }
-        _client = new LexiconUploadClient(baseUrl, apiToken, HandlerFactory?.Invoke());
-        _queue.ResetAuthPause();
-        // A "server not allowed" answer belongs to the site and account it
-        // came from. Configure cannot tell a changed token or URL from a
-        // flipped toggle (it never keeps the token to compare), so every
-        // reconfigure forgets — the cost of forgetting too often is one
-        // refused request per such server, then the skip resumes.
-        _queue.ForgetRefusedServers();
         // Raid-tab entitlement check — regardless of the auto-upload toggle
         // (the tab's local features don't need uploads on).
         _lastAccessProbe = DateTimeOffset.Now;
-        ProbeAttendanceAccess(_client);
+        ProbeAttendanceAccess(client);
         if (enabled)
             Set(Loc.Get("UploadSvc_Ready"));
     }
@@ -206,7 +263,7 @@ public sealed class UploadService : IDisposable
         if (source is null)
             return;
         if (BuildAttendancePayload(source.Owner, source.Path, now, snapshot) is not { } payload)
-            return; // no server folder — see BuildAttendancePayload; stays quiet like every attendance failure
+            return; // no usable server folder — see BuildAttendancePayload; stays quiet like every attendance failure
         _lastAttendanceSend = now;
         _ = Task.Run(() => client.UploadAttendanceAsync(payload));
         _ = Task.Run(async () =>
@@ -219,16 +276,18 @@ public sealed class UploadService : IDisposable
 
     /// <summary>The snapshot payload for one tick, or null when the logger's
     /// log is not inside a logs/&lt;server&gt;/ folder
-    /// (<see cref="LogPaths.ParseServerName"/> == ""). Both requests the
+    /// (<see cref="LogPaths.ParseServerName"/> == "") or that folder's name
+    /// is not a server name the site accepts
+    /// (<see cref="LogPaths.IsServerNameAccepted"/>). Both requests the
     /// tick makes need the server — the attendance ingest and the raid-mains
-    /// lookup each answer 400 without one — so there is nothing to send, and
-    /// the tick must not spend its five-minute slot on a request that can
-    /// only be refused.</summary>
+    /// lookup each answer 400 to a missing or malformed one — so there is
+    /// nothing to send, and the tick must not spend its five-minute slot on
+    /// a request that can only be refused.</summary>
     internal static AttendancePayload? BuildAttendancePayload(
         string owner, string logPath, DateTimeOffset now, IReadOnlyList<Core.Raid.RaidMemberState> snapshot)
     {
         var server = LogPaths.ParseServerName(logPath);
-        if (server.Length == 0)
+        if (!LogPaths.IsServerNameAccepted(server))
             return null;
         return new AttendancePayload
         {
@@ -255,8 +314,9 @@ public sealed class UploadService : IDisposable
     }
 
     /// <summary>The auto-upload gate: on + configured, the log sits in a
-    /// server folder, and (when raid-only is set) a raid fight per
-    /// <see cref="RaidUploadFilter"/>. A skipped fight is counted and named
+    /// folder the site would accept as a server name, and (when raid-only
+    /// is set) a raid fight per <see cref="RaidUploadFilter"/>. A skipped
+    /// fight is counted and named
     /// in the status line so an empty parses page is explainable from the
     /// Settings card. Pump thread, under the sync lock — the classifier
     /// walk is the same cost attendance pays.</summary>
@@ -266,17 +326,26 @@ public sealed class UploadService : IDisposable
             return false;
         // A log read straight from <install>/logs/ (the legacy layout) has
         // no server folder, so logger_server would be "" — and the site
-        // answers 400 to that, every time: it has no default world. Sending
-        // would be one doomed request per fight, so skip and say what to
-        // fix. Checked before the raid-only rule: with no server NOTHING
+        // answers 400 to that, every time: it has no default world. A log
+        // in a folder whose name is not shaped like a server name ("2nd
+        // account", a name past 31 characters) gets a 400 "malformed" just
+        // as surely. Sending would be one doomed request per fight, so skip
+        // and say what to fix. Checked before the raid-only rule: NOTHING
         // from this log can upload, and that is the reason worth showing.
         // A placeholder-titled fight is never uploaded anyway (Enqueue
         // drops it), so it is not counted as skipped for this either.
-        if (encounter.Title != Encounter.PlaceholderTitle && LogPaths.ParseServerName(encounter.SourceId).Length == 0)
+        if (encounter.Title != Encounter.PlaceholderTitle)
         {
-            SkippedNoServer++;
-            Set(Loc.Format("UploadSvc_NoServerFolder", encounter.Title));
-            return false;
+            var server = LogPaths.ParseServerName(encounter.SourceId);
+            if (ServerFolderProblem(encounter.Title, server) is { } problem)
+            {
+                if (server.Length == 0)
+                    SkippedNoServer++;
+                else
+                    SkippedServerName++;
+                Set(problem);
+                return false;
+            }
         }
         if (!_raidOnly || encounter.Title == Encounter.PlaceholderTitle)
             return true;
@@ -293,9 +362,10 @@ public sealed class UploadService : IDisposable
     /// and keeps the longest as primary). Works with the auto toggle off —
     /// right-clicking Upload IS the consent — and clears a bad-token pause
     /// (and the refused-server memory), since the explicit action is the
-    /// retry. A source whose log is not in a server folder is refused HERE
+    /// retry. A source whose log is not in a server folder, or is in a
+    /// folder the site would not take as a server name, is refused HERE
     /// with the reason: consent does not make the request able to succeed
-    /// (the site answers 400 without a server). When that leaves nothing to
+    /// (the site answers 400 to both). When that leaves nothing to
     /// send, nothing is retried, so a pause is left exactly as it was.</summary>
     public void UploadFight(IReadOnlyList<Encounter> sources)
     {
@@ -305,17 +375,17 @@ public sealed class UploadService : IDisposable
             return;
         }
         List<(Encounter Encounter, string Server)> sendable = new(sources.Count);
-        string? noServerTitle = null;
+        string? refusal = null;
         foreach (var encounter in sources)
         {
             var server = LogPaths.ParseServerName(encounter.SourceId);
-            if (server.Length == 0)
-                noServerTitle ??= encounter.Title;
+            if (ServerFolderProblem(encounter.Title, server) is { } problem)
+                refusal ??= problem;
             else
                 sendable.Add((encounter, server));
         }
-        if (noServerTitle is not null)
-            Set(Loc.Format("UploadSvc_NoServerFolder", noServerTitle));
+        if (refusal is not null)
+            Set(refusal);
         if (sendable.Count == 0)
             return;
         _queue.ResetAuthPause();
@@ -324,6 +394,71 @@ public sealed class UploadService : IDisposable
         // ago, and probing the log NOW says nothing about who wrote it THEN.
         foreach (var (encounter, server) in sendable)
             _queue.Enqueue(encounter, server, withProvenance: false);
+    }
+
+    /// <summary>Why nothing from a log in this folder can be uploaded, as
+    /// the status line for the fight titled <paramref name="title"/>; null
+    /// when the folder is a usable server name. <paramref name="server"/>
+    /// is <see cref="LogPaths.ParseServerName"/> of the log: "" means the
+    /// log is not in a server folder at all, anything else that fails
+    /// <see cref="LogPaths.IsServerNameAccepted"/> is a folder the site
+    /// would answer 400 "malformed" to. One place, so the automatic and the
+    /// manual path give the same reason.</summary>
+    private static string? ServerFolderProblem(string title, string server)
+    {
+        if (server.Length == 0)
+            return Loc.Format("UploadSvc_NoServerFolder", title);
+        return LogPaths.IsServerNameAccepted(server)
+            ? null
+            : Loc.Format("UploadQ_ServerFolderName", title, Shortened(server));
+    }
+
+    /// <summary>A folder name for the status line: it can be as long as the
+    /// file system allows, and the line has to stay readable.</summary>
+    private static string Shortened(string name) => name.Length <= 40 ? name : name[..40] + "…";
+
+    /// <summary>The upload queue's status lines in the interface language:
+    /// one <c>UploadQ_*</c> key per line of
+    /// <see cref="UploadQueueMessages"/>, same arguments in the same order.
+    /// The site's own text (a <c>detail</c>, a status word) goes in as it
+    /// arrived. <c>Loc.Format</c> falls back to English and never throws, so
+    /// no line here can fail on the queue's drain thread.</summary>
+    internal sealed class LocalizedUploadMessages : UploadQueueMessages
+    {
+        public static LocalizedUploadMessages Instance { get; } = new();
+
+        public override string Uploaded(string title, string serverStatus, int uploadedThisSession) =>
+            Loc.Format("UploadQ_Uploaded", title, serverStatus, uploadedThisSession);
+
+        public override string Retrying(string title, string reason) =>
+            Loc.Format("UploadQ_Retrying", title, reason);
+
+        public override string Failed(string title, string reason) =>
+            Loc.Format("UploadQ_Failed", title, reason);
+
+        public override string Refused(string title, string detail) =>
+            Loc.Format("UploadQ_Refused", title, detail);
+
+        public override string PausedTokenRejected(int statusCode) =>
+            Loc.Format("UploadQ_PausedTokenRejected", statusCode);
+
+        public override string PausedRefused(int statusCode) =>
+            Loc.Format("UploadQ_PausedRefused", statusCode);
+
+        public override string PausedRefusedWithDetail(int statusCode, string detail) =>
+            Loc.Format("UploadQ_PausedRefusedWithDetail", statusCode, detail);
+
+        public override string SkippedRefusedServer(string title, string server, int skippedThisSession) =>
+            Loc.Format("UploadQ_SkippedRefusedServer", title, server, skippedThisSession);
+
+        public override string RateLimitWait(string title, int seconds, int attemptsUsed, int attemptsAllowed) =>
+            Loc.Format("UploadQ_RateLimitWait", title, seconds, attemptsUsed, attemptsAllowed);
+
+        public override string BuildFailed(string title, string problem) =>
+            Loc.Format("UploadQ_BuildFailed", title, problem);
+
+        public override string NotConfigured(string title, string reason, int droppedThisSession) =>
+            Loc.Format("UploadQ_NotConfigured", title, reason, droppedThisSession);
     }
 
     /// <summary>Settings "Test" button — verifies the token against

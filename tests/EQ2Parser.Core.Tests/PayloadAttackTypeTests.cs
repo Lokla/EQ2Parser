@@ -10,7 +10,10 @@ namespace EQ2Parser.Core.Tests;
 /// The per-ability rows of the upload (<c>attack_types</c>): one row per
 /// (ability, swing category), each built from that category's swings only,
 /// labelled the way the site's tabs read them. Everything else in the
-/// payload is pinned to the bytes it had before these rows changed.
+/// payload is pinned to the bytes it had before these rows changed — with
+/// one later, deliberate exception, pinned just as tightly: the combatant
+/// row of a combatant that exists only through swings the upload leaves
+/// out is no longer sent (see "the phantom combatant row" below).
 /// </summary>
 public class PayloadAttackTypeTests
 {
@@ -75,6 +78,15 @@ public class PayloadAttackTypeTests
     }
 
     private static LexiconPayload BossPayload() => PayloadBuilder.Build(Fight(BossFight), "Varsoon");
+
+    /// <summary>The boss fight without its two control-effect lines ("… is
+    /// stunned!" / "… is no longer stunned."): the same fight with no
+    /// status swing in it, so no "Unknown" combatant is ever created.</summary>
+    private static (int At, string Message)[] BossFightWithoutStatusLines() =>
+        [.. BossFight.Where(l => !l.Message.Contains("stunned", StringComparison.Ordinal))];
+
+    private static string Sha256(string text) =>
+        Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(text)));
 
     private static PayloadAttackType Row(LexiconPayload payload, string attacker, string ability, SwingCategory category) =>
         Assert.Single(payload.AttackTypes, a => a.Attacker == attacker && a.Type == ability && a.SwingType == (int)category);
@@ -150,11 +162,195 @@ public class PayloadAttackTypeTests
         damage_type {"combatant":"Lord Vexmoor","type":"Skill/Ability (Out)","starttime":"2026-03-31T23:33:25Z","endtime":"2026-03-31T23:33:25Z","damage":1100,"encdps":91.67,"dps":1100,"critperc":0,"median":1100,"minhit":1100,"maxhit":1100,"hits":1,"crithits":0,"blocked":0,"misses":0,"swings":1}
         """;
 
+    /// <summary>The one line of <see cref="BeforeTheSplit"/> that is no
+    /// longer uploaded: the "Unknown" combatant that existed only as the
+    /// attacker of the two status swings ("Lord Vexmoor is stunned!" and its
+    /// release). Those swings are not uploaded, so the row was every figure
+    /// zero and sat on the site's parse page. <see cref="BeforeTheSplit"/>
+    /// itself is left exactly as captured.</summary>
+    private const string PhantomUnknownRow =
+        """combatant {"name":"Unknown","ally":"F","starttime":"2026-03-31T23:33:27Z","endtime":"2026-03-31T23:33:29Z","duration":2,"damage":0,"kills":0,"healed":0,"critheals":0,"heals":0,"curedispels":0,"powerdrain":0,"powerreplenish":0,"dps":0,"encdps":0,"enchps":0,"hits":0,"crithits":0,"blocked":0,"misses":0,"swings":0,"healstaken":0,"damagetaken":0,"deaths":0,"tohit":0}""";
+
     [Fact]
     public void Everything_But_Attack_Types_Is_Byte_For_Byte_What_It_Was()
     {
-        var expected = BeforeTheSplit.ReplaceLineEndings("\n").Split('\n');
+        var before = BeforeTheSplit.ReplaceLineEndings("\n").Split('\n');
+        Assert.Single(before, line => line == PhantomUnknownRow);
+        // Every other line, in the same order, to the byte.
+        var expected = before.Where(line => line != PhantomUnknownRow).ToArray();
+        Assert.Equal(before.Length - 1, expected.Length);
         Assert.Equal(expected, EverythingButAttackTypes(BossPayload()));
+    }
+
+    // ── What must not move: the phantom combatant row ───────────────────────
+
+    /// <summary>SHA-256 of the complete upload JSON, captured from the
+    /// builder BEFORE it left any combatant out (same fights, same code
+    /// path) — not derived from the code under test.
+    ///   * <see cref="NoStatusFightBefore"/>: the fight without status lines.
+    ///   * <see cref="BossFightBefore"/>: the boss fight, phantom row and all.
+    ///   * <see cref="BossFightBeforeMinusThePhantom"/>: that same captured
+    ///     JSON with the one "Unknown" combatant object (and its comma) cut
+    ///     out and nothing else touched.</summary>
+    private const string NoStatusFightBefore = "fcf69ccbcff7989657c74670726e9aa7a6f944627b71ad1d74df273a30adde7d";
+    private const string BossFightBefore = "cf35745f805fee47eb50f6864e7240f15249e564a02d4ad4dac759d07711f7d1";
+    private const string BossFightBeforeMinusThePhantom = "eca3011b8cddb5ffc3706b0dd67368b7c8d5abf567cba19af6457271f94c97f5";
+
+    [Fact]
+    public void A_Fight_Without_A_Phantom_Combatant_Uploads_Byte_For_Byte_What_It_Did()
+    {
+        // No status line, so no combatant exists only because of one: the
+        // whole payload — every key, attack_types included — is unchanged.
+        var fight = Fight(BossFightWithoutStatusLines());
+        Assert.False(fight.Combatants.ContainsKey(Combatant.UnknownKey));
+
+        var json = PayloadBuilder.Build(fight, "Varsoon").ToJson();
+        Assert.Equal(NoStatusFightBefore, Sha256(json));
+    }
+
+    [Fact]
+    public void The_Phantom_Row_Is_The_Only_Thing_That_Left_The_Boss_Fight_Payload()
+    {
+        var json = BossPayload().ToJson();
+        Assert.NotEqual(BossFightBefore, Sha256(json));
+        Assert.Equal(BossFightBeforeMinusThePhantom, Sha256(json));
+
+        // The same statement without a hash: apart from the encid (its seed
+        // counts the encounter's combatants, see below) the upload is now
+        // exactly that of the fight in which no status line was ever logged.
+        var withoutStatus = PayloadBuilder.Build(Fight(BossFightWithoutStatusLines()), "Varsoon");
+        Assert.Equal(withoutStatus.ToJson().Replace("\"encid\":\"8a7a8a56\"", "\"encid\":\"b7e49221\"", StringComparison.Ordinal), json);
+    }
+
+    [Fact]
+    public void EncId_Is_Unchanged_Whether_Or_Not_A_Phantom_Row_Was_Dropped()
+    {
+        // The hash seed is owner | zone | title | start second | the number
+        // of combatants in the ENCOUNTER (ComputeEncId) — it never reads the
+        // payload, so leaving a row out of the upload cannot move it. Both
+        // values are the ones these fights had before the row was dropped.
+        var boss = Fight(BossFight);
+        Assert.Equal(5, boss.Combatants.Count); // "Unknown" is still a combatant of the encounter
+        Assert.True(boss.Combatants.ContainsKey(Combatant.UnknownKey));
+        var bossPayload = PayloadBuilder.Build(boss, "Varsoon");
+        Assert.Equal(4, bossPayload.Combatants.Count);
+        Assert.Equal("b7e49221", PayloadBuilder.ComputeEncId(boss));
+        Assert.Equal("b7e49221", bossPayload.Encounter.EncId);
+
+        var plain = Fight(BossFightWithoutStatusLines());
+        Assert.Equal(4, plain.Combatants.Count);
+        Assert.Equal("8a7a8a56", PayloadBuilder.ComputeEncId(plain));
+        Assert.Equal("8a7a8a56", PayloadBuilder.Build(plain, "Varsoon").Encounter.EncId);
+    }
+
+    /// <summary>A fight in which combatants come to exist in every way a
+    /// status line can make one: the anonymous attacker of an apply and a
+    /// release, a mob that was only ever stunned, and a player whose only
+    /// logged act was a silence. Around them, the zero-damage combatants
+    /// that must keep their rows.</summary>
+    private static readonly (int At, string Message)[] StatusHeavyFight =
+    [
+        (0, "YOU hit Lord Vexmoor for 400 slashing damage."),
+        (1, "Lord Vexmoor is stunned!"), //                                   Unknown: attacker of status swings only
+        (1, "a bone sentry is mesmerized!"), //                               a bone sentry: only ever the victim of one
+        (2, "Corwin silences Lord Vexmoor's actions."), //                    Corwin: a named source, status only
+        (2, "Brenna's Mending Veil heals Aldwyn for 800 hit points."), //     Brenna: zero damage, healed
+        (3, "Lord Vexmoor tries to crush Dunmore, but Dunmore parries."), //  Dunmore: zero damage, was attacked
+        (3, "Lord Vexmoor hits a stone warden for 90 crushing damage."), //   a stone warden: zero damage, was hit
+        (4, "Lord Vexmoor is no longer stunned."),
+        (4, "a tomb rat has been slain by Lord Vexmoor!"), //                 a tomb rat: zero damage, died
+        (5, "Elswyth's Purify relieves Rending Howl from Aldwyn."), //        Elswyth: zero damage, a Cure/Dispel damage_types row
+        (6, "You have killed Lord Vexmoor."),
+    ];
+
+    [Fact]
+    public void A_Combatant_That_Exists_Only_Through_Status_Swings_Is_Not_Uploaded()
+    {
+        var fight = Fight(StatusHeavyFight);
+        var payload = PayloadBuilder.Build(fight, "Varsoon");
+        var uploaded = payload.Combatants.Select(c => c.Name).ToHashSet(StringComparer.Ordinal);
+
+        // All three are combatants of the encounter (history, ability
+        // mining and the encid seed still see them) …
+        Assert.True(fight.Combatants.ContainsKey(Combatant.UnknownKey));
+        Assert.True(fight.Combatants.ContainsKey("A BONE SENTRY"));
+        Assert.True(fight.Combatants.ContainsKey("CORWIN"));
+        // … and none has a row: every swing they made or received is one
+        // the upload leaves out.
+        Assert.DoesNotContain(Combatant.UnknownName, uploaded);
+        Assert.DoesNotContain("a bone sentry", uploaded);
+        Assert.DoesNotContain("Corwin", uploaded);
+        Assert.Equal(fight.Combatants.Count - 3, payload.Combatants.Count);
+    }
+
+    [Theory]
+    [InlineData("Brenna")] //          healed
+    [InlineData("Dunmore")] //         was attacked, never hit
+    [InlineData("a stone warden")] //  was hit
+    [InlineData("a tomb rat")] //      died
+    [InlineData("Elswyth")] //         has a damage_types row (Cure/Dispel (Out))
+    public void A_Real_Combatant_With_Zero_Damage_Still_Uploads(string name)
+    {
+        var payload = PayloadBuilder.Build(Fight(StatusHeavyFight), "Varsoon");
+        var row = Assert.Single(payload.Combatants, c => c.Name == name);
+        Assert.Equal(0, row.Damage);
+    }
+
+    [Fact]
+    public void Unknown_Keeps_Its_Row_When_It_Did_Something_That_Is_Uploaded()
+    {
+        // Anonymous damage ("is hit by …") is filed under "Unknown" too. A
+        // status line in the same fight must not cost that row.
+        var payload = PayloadBuilder.Build(
+            Fight(
+                (0, "YOU hit Lord Vexmoor for 400 slashing damage."),
+                (1, "Lord Vexmoor is stunned!"),
+                (2, "Lord Vexmoor is hit by Acid Spray for 447 poison damage."),
+                (3, "You have killed Lord Vexmoor.")),
+            "Varsoon");
+
+        var unknown = Assert.Single(payload.Combatants, c => c.Name == Combatant.UnknownName);
+        Assert.Equal(447, unknown.Damage);
+        Assert.Contains(payload.DamageTypes, d => d.Combatant == Combatant.UnknownName && d.Type == BucketConfig.OutgoingDamage);
+        Assert.Equal(447, Row(payload, Combatant.UnknownName, "Acid Spray", SwingCategory.NonMelee).Damage);
+        Assert.DoesNotContain(payload.AttackTypes, a => a.Type == "stunned");
+    }
+
+    [Fact]
+    public void The_Log_Owner_Keeps_Their_Row_Whatever_They_Did()
+    {
+        // The owner is always their own ally, and the logger's row is the
+        // one the upload is filed under: it is never the one left out, even
+        // when a status line is all the log holds about them.
+        var payload = PayloadBuilder.Build(
+            Fight(
+                (0, "Brenna hits Lord Vexmoor for 400 slashing damage."),
+                (1, "Aldwyn is stunned!"),
+                (2, "Brenna hits Lord Vexmoor for 300 slashing damage.")),
+            "Varsoon");
+
+        var owner = Assert.Single(payload.Combatants, c => c.Name == Owner);
+        Assert.Equal("T", owner.Ally);
+        Assert.DoesNotContain(payload.Combatants, c => c.Name == Combatant.UnknownName);
+    }
+
+    public static TheoryData<string> FightsWithStatusLines => new() { "boss", "status-heavy" };
+
+    [Theory]
+    [MemberData(nameof(FightsWithStatusLines))]
+    public void Every_Row_Still_Refers_To_A_Combatant_That_Is_Uploaded(string which)
+    {
+        // The site resolves damage_types.combatant and attack_types.attacker
+        // against the combatant rows of the same upload: a row whose
+        // combatant was left out would be an orphan.
+        var payload = PayloadBuilder.Build(Fight(which == "boss" ? BossFight : StatusHeavyFight), "Varsoon");
+        var uploaded = payload.Combatants.Select(c => c.Name).ToHashSet(StringComparer.Ordinal);
+
+        Assert.NotEmpty(payload.DamageTypes);
+        Assert.NotEmpty(payload.AttackTypes);
+        Assert.All(payload.DamageTypes, d => Assert.Contains(d.Combatant, uploaded));
+        Assert.All(payload.AttackTypes, a => Assert.Contains(a.Attacker, uploaded));
+        Assert.Equal(uploaded.Count, payload.Combatants.Count); // names stay unique
     }
 
     [Fact]

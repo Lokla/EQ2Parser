@@ -286,4 +286,130 @@ public class UploadClientTests
         Assert.Equal(403, result.StatusCode);
         Assert.Equal("no-guild", result.RejectCode);
     }
+
+    // ── Retry-After ─────────────────────────────────────────────────────────
+
+    /// <summary>Answers every request with the given status and body and,
+    /// when given, a Retry-After header set to exactly the supplied text.</summary>
+    private sealed class RetryAfterHandler(HttpStatusCode status, string body, string? retryAfter) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            var response = new HttpResponseMessage(status) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
+            if (retryAfter is not null)
+                response.Headers.TryAddWithoutValidation("Retry-After", retryAfter);
+            return Task.FromResult(response);
+        }
+    }
+
+    private static readonly DateTimeOffset Now = new(2026, 10, 11, 12, 0, 0, TimeSpan.Zero);
+
+    private static System.Net.Http.Headers.RetryConditionHeaderValue? Header(string? text)
+    {
+        using var response = new HttpResponseMessage(HttpStatusCode.TooManyRequests);
+        if (text is not null)
+            response.Headers.TryAddWithoutValidation("Retry-After", text);
+        return response.Headers.RetryAfter;
+    }
+
+    [Theory]
+    [InlineData("30", 30)] //                             delta-seconds
+    [InlineData("0", 0)] //                               "now": the queue raises it to its minimum
+    [InlineData("3600", 3600)] //                         unclamped here; the queue holds it to its maximum
+    [InlineData("Sun, 11 Oct 2026 12:00:45 GMT", 45)] //  HTTP-date, 45 s after Now
+    [InlineData("Sun, 11 Oct 2026 14:00:00 GMT", 7200)]
+    public void Retry_After_Is_Read_In_Both_Forms(string header, int expectedSeconds) =>
+        Assert.Equal(TimeSpan.FromSeconds(expectedSeconds), LexiconUploadClient.ReadRetryAfter(Header(header), Now));
+
+    [Theory]
+    [InlineData(null)] //                                 absent
+    [InlineData("")]
+    [InlineData("soon")] //                               neither form
+    [InlineData("-5")]
+    [InlineData("1.5")]
+    [InlineData("99999999999999999999")] //               more seconds than the header type holds
+    [InlineData("Sun, 11 Oct 2026 12:00:00 GMT")] //      exactly Now: not in the future
+    [InlineData("Sun, 11 Oct 2026 11:59:00 GMT")] //      a minute ago
+    [InlineData("Wed, 21 Oct 2015 07:28:00 GMT")] //      years ago: a skewed clock, not "retry now"
+    public void An_Absent_Or_Unusable_Retry_After_Reads_As_None(string? header) =>
+        Assert.Null(LexiconUploadClient.ReadRetryAfter(Header(header), Now));
+
+    [Fact]
+    public async Task A_Rate_Limited_Upload_Carries_The_Sites_Retry_After()
+    {
+        // The site's flood-budget 429: a detail and a delta-seconds header.
+        using var client = new LexiconUploadClient(
+            "https://parses.example.com",
+            "eq2c_test_token",
+            new RetryAfterHandler(HttpStatusCode.TooManyRequests, """{"detail":"Over the upload budget. Retry after 17 s."}""", "17"));
+
+        var result = await client.UploadAsync(PayloadBuilder.Build(BuildEncounter(), "Varsoon"));
+
+        Assert.False(result.Success);
+        Assert.Equal(429, result.StatusCode);
+        Assert.Equal(TimeSpan.FromSeconds(17), result.RetryAfter);
+        Assert.Equal("Over the upload budget. Retry after 17 s.", result.Message);
+    }
+
+    [Fact]
+    public async Task A_Rate_Limited_Upload_Reads_An_Http_Date_Against_The_Clock()
+    {
+        var at = DateTimeOffset.UtcNow.AddSeconds(90);
+        using var client = new LexiconUploadClient(
+            "https://parses.example.com",
+            "eq2c_test_token",
+            new RetryAfterHandler(HttpStatusCode.TooManyRequests, "{}", at.ToString("r", System.Globalization.CultureInfo.InvariantCulture)));
+
+        var result = await client.UploadAsync(PayloadBuilder.Build(BuildEncounter(), "Varsoon"));
+
+        // The header has whole seconds and the clock moved on a little.
+        Assert.NotNull(result.RetryAfter);
+        Assert.InRange(result.RetryAfter.Value, TimeSpan.FromSeconds(80), TimeSpan.FromSeconds(90));
+    }
+
+    [Fact]
+    public async Task The_Sites_Own_Rate_Limit_Answer_Carries_No_Retry_After()
+    {
+        // slowapi's stock 429, as the 60-a-minute limit sends it: an
+        // "error" key, no "detail", no header. The queue's fixed wait is
+        // what applies to it.
+        using var client = new LexiconUploadClient(
+            "https://parses.example.com",
+            "eq2c_test_token",
+            new RetryAfterHandler(HttpStatusCode.TooManyRequests, """{"error":"Rate limit exceeded: 60 per 1 minute"}""", null));
+
+        var result = await client.UploadAsync(PayloadBuilder.Build(BuildEncounter(), "Varsoon"));
+
+        Assert.Equal(429, result.StatusCode);
+        Assert.Null(result.RetryAfter);
+        Assert.Equal("Server responded 429", result.Message);
+    }
+
+    [Fact]
+    public async Task A_Successful_Upload_Carries_The_Sites_Status_Word()
+    {
+        // Beside the client's own sentence, so the queue can write its
+        // status line around the word in the user's language.
+        var handler = new CapturingHandler(HttpStatusCode.Created, """{"status":"skipped","encounter_id":null}""");
+        using var client = new LexiconUploadClient("https://parses.example.com/", "eq2c_test_token", handler);
+
+        var result = await client.UploadAsync(PayloadBuilder.Build(BuildEncounter(), "Varsoon"));
+
+        Assert.True(result.Success);
+        Assert.Equal("skipped", result.ServerStatus);
+        Assert.Equal("Uploaded (skipped).", result.Message);
+        Assert.Null(result.RetryAfter);
+        Assert.False(result.NotConfigured);
+    }
+
+    [Fact]
+    public void A_Send_Without_A_Client_Is_Its_Own_Outcome()
+    {
+        var result = UploadResult.NoClient("No API token configured.");
+
+        Assert.True(result.NotConfigured);
+        Assert.False(result.Success);
+        Assert.Equal(0, result.StatusCode);
+        Assert.Equal("No API token configured.", result.Message);
+    }
 }

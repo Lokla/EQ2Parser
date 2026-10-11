@@ -100,28 +100,47 @@ The vertical (2026-08-03): `Core/Upload/` holds the testable pieces —
 `LexiconUploadClient` (transport: bearer + HMAC + gzip, injectable handler,
 plus the `UrlProblem` https-only guard with a loopback dev exception),
 `LexiconPayload` (wire DTOs), `PayloadBuilder` (Encounter → payload; 8-hex
-content encid so re-uploads dedupe server-side), `LogPaths.ParseServerName`
+content encid so re-uploads dedupe server-side. A combatant that exists
+only through swings the upload leaves out — the "Unknown" attacker of a
+control-effect line — gets no row, `HasUploadedSwing`; the encid seed counts
+the encounter's combatants, so it does not move), `LogPaths.ParseServerName`
 (logger_server = the log's parent dir; "" for the legacy `logs/` root.
 The server requires `logger_server` and has no default world, so the
 parser sends NOTHING for such a log: the auto path skips the fight with a
 reason in the status line (`UploadService.SkippedNoServer`), a manual
 upload is refused locally, `UploadQueue.Enqueue` drops a blank server and
 no attendance snapshot is built — only logs under `logs/<server>/`
-upload, and the server must be on the site's allow-list),
+upload, and the server must be on the site's allow-list. A folder whose
+name is not shaped like a server name is treated the same way
+(`SkippedServerName`): `LogPaths.IsServerNameAccepted` applies
+`ServerNamePattern`, which mirrors `WORLD_NAME_RE` in
+`EQ2Lexicon/backend/server/core/validation.py` — keep them in step),
 and `UploadQueue` (channel drain off
-the pump thread, bounded retry on network/5xx and on the site's 429. A 401,
+the pump thread, bounded retry on network/5xx and on the site's 429, which
+waits the response's Retry-After held to 1–120 s, else the fixed
+`RateLimitDelay`. A 401,
 or a 403 WITHOUT the `X-Lexicon-Reject` response header, sets AuthPaused so
 a bad token or an unapproved account is never hammered. A 403 WITH the
 header is about that one upload: it fails alone and the queue carries on;
 the code `server-not-allowed` also stops sending for that logger_server
 for the session (`SkippedRefusedServer`). The header mirrors `REJECT_HEADER`
-in `EQ2Lexicon/backend/server/api/parses/ingest.py` — keep them in step).
+in `EQ2Lexicon/backend/server/api/parses/ingest.py` — keep them in step.
+A send with no client behind it (`UploadResult.NotConfigured`) drops the
+fight at once, counted in `SkippedNotConfigured`, never retried.
+`ConfigurationChanged` starts a new generation: it clears the pause and the
+refused servers, and an answer to a send made under an older generation
+cannot set either — that upload is sent again under the current one. The
+status lines come from `UploadQueueMessages`, English by default).
 
 App side: `UploadService` (thin adapter on SourceManager:
 `SourceManager.OnEncounterEnded`, the one handler Add/Remove subscribe to
 `Engine.EncounterEnded`, calls it beside History.QueueSave, each consumer
 in its own guard so one failing cannot starve the rest;
-`Configure` re-reads settings), `TokenProtector` (DPAPI CurrentUser — only
+`Configure` re-reads settings, swaps the client in one assignment and THEN
+calls `UploadQueue.ConfigurationChanged`; `LocalizedUploadMessages` gives
+the queue its lines from the `UploadQ_*` strings; the pause is the
+`UploadsPaused` property, never a word searched for in the status text),
+`TokenProtector` (DPAPI CurrentUser — only
 ciphertext ever reaches settings.json; ProtectedData is in-box on the
 windows TFM, no package), Settings → "Parse uploads" card (PasswordBox is
 read+cleared in the command, never bound), and a fight-tree "Upload to

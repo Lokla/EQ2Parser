@@ -186,7 +186,13 @@ public sealed class SourceManagerStartupTests : IDisposable
         // consumer fault (an archive write, a classifier bug).
         manager.Uploads.PlayerCounter = _ => throw new InvalidOperationException("consumer broke");
         manager.Uploads.Configure("https://example.test", "token", enabled: true, raidOnly: true);
-        var source = AddSource(manager);
+        // In a server-named folder: the upload gate skips a log whose folder
+        // is not a server name the site accepts BEFORE it asks the player
+        // counter, and the sandbox folder (32 hex characters) is not one.
+        var log = _dir.FileIn(Path.Combine("Varsoon", "eq2log_Tester.txt"));
+        Directory.CreateDirectory(Path.GetDirectoryName(log)!);
+        File.WriteAllText(log, "");
+        var source = manager.Add(log, parseFromStart: false);
 
         lock (manager.Sync)
         {

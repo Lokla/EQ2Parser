@@ -23,6 +23,36 @@ public static partial class EnglishGrammar
 
     public const string AutoAttackAbility = Swing.AutoAttackAbility;
 
+    // ── Amounts ─────────────────────────────────────────────────────────────
+    // 368 · 15,032 · 140.6K · 1.2M · 1.5B
+    // The number in every pattern that carries one (the amount group and the
+    // ward's remaining group), written once so the shapes cannot drift apart.
+    // It starts with a DIGIT: the game never writes an amount behind a
+    // comma, and the older [\d,]+ read ",5" as 5 and let "," through to the
+    // number parser. Every amount in the committed corpus and in the grammar
+    // tests starts with a digit, and a digit-first amount matches exactly as
+    // it did (same group, same backtracking order), so no real shape moved.
+    // Still loose past the first character ("5,", "1,2,3", non-ASCII
+    // digits): TryParseAmount decides what is a number.
+    private const string Amount = @"\d[\d,]*(?:\.\d+)?[KMB]?";
+
+    /// <summary>Plausibility ceiling on one parsed amount: ten trillion.
+    /// A line's text is not entirely the game's to choose (a custom emote
+    /// can be shaped like a damage line), and without a ceiling one forged
+    /// amount near <see cref="long.MaxValue"/> made every total it joined
+    /// wrap negative, and made any checked sum over the swings throw.
+    ///
+    /// Why this number. Above anything real: the grammar reads amounts up
+    /// to the B suffix, so with a mantissa under a thousand the notation
+    /// tops out at 999.9B, about a tenth of this; the largest hit in the
+    /// committed raid corpus is 140.6K. Far below overflow: it takes over
+    /// 900,000 amounts of exactly this size in ONE running total to pass a
+    /// long, where a fight sums a few thousand swings and a forged line
+    /// arrives at chat speed. An amount over it is refused like every other
+    /// unrepresentable amount: the line is a non-match, never a clamped or
+    /// zero hit.</summary>
+    public const long MaxAmount = 10_000_000_000_000;
+
     // ── Damage ──────────────────────────────────────────────────────────────
     // YOUR Divine Strike hits a bog slug for a critical of 15,032 divine damage.
     // YOU hit a lesser shadowbone skeleton for a critical of 5,529 crushing damage.
@@ -40,23 +70,23 @@ public static partial class EnglishGrammar
         "hits|hit|multi attacks|multi attack|double attacks|double attack|"
         + "flurries|flurry|aoe attacks|aoe attack";
 
-    [GeneratedRegex($@"^YOUR (?<ability>.+?) (?<verb>{DamageVerbs}) (?<victim>.+?) for (?<crit>a critical of )?(?<amount>[\d,]+(?:\.\d+)?[KMB]?) (?<school>\w+) damage\.$")]
+    [GeneratedRegex($@"^YOUR (?<ability>.+?) (?<verb>{DamageVerbs}) (?<victim>.+?) for (?<crit>a critical of )?(?<amount>{Amount}) (?<school>\w+) damage\.$")]
     private static partial Regex YourAbilityDamage();
 
-    [GeneratedRegex($@"^YOU (?<verb>{DamageVerbs}) (?<victim>.+?) for (?<crit>a critical of )?(?<amount>[\d,]+(?:\.\d+)?[KMB]?) (?<school>\w+) damage\.$")]
+    [GeneratedRegex($@"^YOU (?<verb>{DamageVerbs}) (?<victim>.+?) for (?<crit>a critical of )?(?<amount>{Amount}) (?<school>\w+) damage\.$")]
     private static partial Regex YouAutoDamage();
 
-    [GeneratedRegex($@"^(?<attacker>.+?)'s? (?<ability>.+?) (?<verb>{DamageVerbs}) (?<victim>.+?) for (?<crit>a critical of )?(?<amount>[\d,]+(?:\.\d+)?[KMB]?) (?<school>\w+) damage\.$")]
+    [GeneratedRegex($@"^(?<attacker>.+?)'s? (?<ability>.+?) (?<verb>{DamageVerbs}) (?<victim>.+?) for (?<crit>a critical of )?(?<amount>{Amount}) (?<school>\w+) damage\.$")]
     private static partial Regex PossessiveAbilityDamage();
 
-    [GeneratedRegex($@"^(?<attacker>.+?) (?<verb>{DamageVerbs}) (?<victim>.+?) for (?<crit>a critical of )?(?<amount>[\d,]+(?:\.\d+)?[KMB]?) (?<school>\w+) damage\.$")]
+    [GeneratedRegex($@"^(?<attacker>.+?) (?<verb>{DamageVerbs}) (?<victim>.+?) for (?<crit>a critical of )?(?<amount>{Amount}) (?<school>\w+) damage\.$")]
     private static partial Regex PlainDamage();
 
     // a creepfern is hit by Acid Spray for 447 poison damage.  (anonymous
     // source — dumbfires/ground effects; attributed to "Unknown". Must be
     // tried before PlainDamage, which would split this into a phantom
     // attacker "a creepfern is" and victim "by Acid Spray".)
-    [GeneratedRegex(@"^(?<victim>.+?) is hit by (?<ability>.+?) for (?<crit>a critical of )?(?<amount>[\d,]+(?:\.\d+)?[KMB]?) (?<school>\w+) damage\.$")]
+    [GeneratedRegex($@"^(?<victim>.+?) is hit by (?<ability>.+?) for (?<crit>a critical of )?(?<amount>{Amount}) (?<school>\w+) damage\.$")]
     private static partial Regex AnonymousHit();
 
     // ── Avoids ──────────────────────────────────────────────────────────────
@@ -71,10 +101,10 @@ public static partial class EnglishGrammar
     // YOUR Reverence heals YOU for 13 hit points.
     // Sofja's Grim Sorcery heals Menludiir for a critical of 1,024 hit points.
 
-    [GeneratedRegex(@"^YOUR (?<ability>.+?) heals (?<victim>.+?) for (?<crit>a critical of )?(?<amount>[\d,]+(?:\.\d+)?[KMB]?) hit points?\.$")]
+    [GeneratedRegex($@"^YOUR (?<ability>.+?) heals (?<victim>.+?) for (?<crit>a critical of )?(?<amount>{Amount}) hit points?\.$")]
     private static partial Regex YourHeal();
 
-    [GeneratedRegex(@"^(?<attacker>.+?)'s? (?<ability>.+?) heals (?<victim>.+?) for (?<crit>a critical of )?(?<amount>[\d,]+(?:\.\d+)?[KMB]?) hit points?\.$")]
+    [GeneratedRegex($@"^(?<attacker>.+?)'s? (?<ability>.+?) heals (?<victim>.+?) for (?<crit>a critical of )?(?<amount>{Amount}) hit points?\.$")]
     private static partial Regex PossessiveHeal();
 
     // ── Zero-damage hits ────────────────────────────────────────────────────
@@ -102,30 +132,40 @@ public static partial class EnglishGrammar
 
     public const string WardAbsorbType = "Ward (Absorb)";
 
-    [GeneratedRegex(@"^(?<attacker>.+?)'s? (?<ability>.+?) absorbs (?<amount>[\d,]+(?:\.\d+)?[KMB]?) points? of damage from being done to (?<victim>.+?)\.(?: \((?<remaining>[\d,]+(?:\.\d+)?[KMB]?) points? remaining\))?$")]
+    [GeneratedRegex($@"^(?<attacker>.+?)'s? (?<ability>.+?) absorbs (?<amount>{Amount}) points? of damage from being done to (?<victim>.+?)\.(?: \((?<remaining>{Amount}) points? remaining\))?$")]
     private static partial Regex WardAbsorb();
 
     // YOUR Stonewill absorbs 720 points of damage from being done to YOURSELF. (479 points remaining)
-    [GeneratedRegex(@"^YOUR (?<ability>.+?) absorbs (?<amount>[\d,]+(?:\.\d+)?[KMB]?) points? of damage from being done to (?<victim>.+?)\.(?: \((?<remaining>[\d,]+(?:\.\d+)?[KMB]?) points? remaining\))?$")]
+    [GeneratedRegex($@"^YOUR (?<ability>.+?) absorbs (?<amount>{Amount}) points? of damage from being done to (?<victim>.+?)\.(?: \((?<remaining>{Amount}) points? remaining\))?$")]
     private static partial Regex YourWardAbsorb();
 
     // ── Power ───────────────────────────────────────────────────────────────
     // Tsuna's Empower Servant refreshes Tsuna for 59 mana points.
 
-    [GeneratedRegex(@"^(?<attacker>.+?)'s? (?<ability>.+?) refreshes (?<victim>.+?) for (?<amount>[\d,]+(?:\.\d+)?[KMB]?) (?:mana|power) points?\.$")]
+    [GeneratedRegex($@"^(?<attacker>.+?)'s? (?<ability>.+?) refreshes (?<victim>.+?) for (?<amount>{Amount}) (?:mana|power) points?\.$")]
     private static partial Regex PowerRefresh();
 
-    [GeneratedRegex(@"^YOUR (?<ability>.+?) refreshes (?<victim>.+?) for (?<amount>[\d,]+(?:\.\d+)?[KMB]?) (?:mana|power) points?\.$")]
+    [GeneratedRegex($@"^YOUR (?<ability>.+?) refreshes (?<victim>.+?) for (?<amount>{Amount}) (?:mana|power) points?\.$")]
     private static partial Regex YourPowerRefresh();
 
     // ── Threat ──────────────────────────────────────────────────────────────
     // Badbang's Insolent Gibe increases THEIR hate with a dragonspawn whelp for 1,234 threat.
     // Noxyi's Dynamism reduces THEIR hate with a blood colossus for 567 threat.
+    // The amount is positive either way: the damage-type marker is the only
+    // thing that tells a threat increase from a reduction.
 
-    [GeneratedRegex(@"^(?<attacker>.+?)'s? (?<ability>.+?) (?<direction>increases|reduces) (?:THEIR|YOUR) hate with (?<victim>.+?) for (?<amount>[\d,]+(?:\.\d+)?[KMB]?) threat\.$")]
+    /// <summary>Damage-type marker on a threat INCREASE ("… increases
+    /// THEIR hate with …").</summary>
+    public const string ThreatIncreaseType = "threat";
+
+    /// <summary>Damage-type marker on a threat REDUCTION ("… reduces THEIR
+    /// hate with …").</summary>
+    public const string ThreatReduceType = "threat-reduce";
+
+    [GeneratedRegex($@"^(?<attacker>.+?)'s? (?<ability>.+?) (?<direction>increases|reduces) (?:THEIR|YOUR) hate with (?<victim>.+?) for (?<amount>{Amount}) threat\.$")]
     private static partial Regex ThreatChange();
 
-    [GeneratedRegex(@"^YOUR (?<ability>.+?) (?<direction>increases|reduces) YOUR hate with (?<victim>.+?) for (?<amount>[\d,]+(?:\.\d+)?[KMB]?) threat\.$")]
+    [GeneratedRegex($@"^YOUR (?<ability>.+?) (?<direction>increases|reduces) YOUR hate with (?<victim>.+?) for (?<amount>{Amount}) threat\.$")]
     private static partial Regex YourThreatChange();
 
     // ── Cures ───────────────────────────────────────────────────────────────
@@ -520,7 +560,7 @@ public static partial class EnglishGrammar
                 Ability: m.Groups["ability"].Value,
                 Damage: amount,
                 Victim: m.Groups["victim"].Value,
-                DamageType: m.Groups["direction"].Value == "reduces" ? "threat-reduce" : "threat")
+                DamageType: m.Groups["direction"].Value == "reduces" ? ThreatReduceType : ThreatIncreaseType)
             : null;
 
     private static SwingEvent Status(string victim, string effect, bool applied, string attacker = "Unknown") => new(
@@ -636,16 +676,18 @@ public static partial class EnglishGrammar
     /// DROPPED every big crit (ACT expands the suffix; so do we).
     ///
     /// TOTAL by contract: false, never an exception, for anything that is
-    /// not an amount a long can hold. The amount pattern is deliberately
-    /// loose ([\d,]+ with an optional decimal and suffix), so it admits
-    /// text no number parser accepts — and a line's text is not entirely
-    /// the game's to choose (a custom emote can end in " damage."), so
-    /// this is reachable input, not theory. What the pattern lets through
-    /// that is refused here:
-    ///   * commas with no digit at all (","),
+    /// not a believable amount. The amount pattern is deliberately loose (a
+    /// digit, then digits and commas, an optional decimal and suffix — see
+    /// <see cref="Amount"/>), so it admits text no number parser accepts —
+    /// and a line's text is not entirely the game's to choose (a custom
+    /// emote can end in " damage."), so this is reachable input, not
+    /// theory. What the pattern lets through that is refused here:
     ///   * more digits than a long (or a decimal) holds,
     ///   * an amount that fits until its K/M/B suffix scales it,
-    ///   * non-ASCII digits (\d matches every Unicode decimal digit).
+    ///   * non-ASCII digits (\d matches every Unicode decimal digit),
+    ///   * anything over <see cref="MaxAmount"/>, before or after scaling.
+    /// The empty and comma-only checks stay although the pattern no longer
+    /// produces either: this method must be total for any text handed to it.
     /// A caller that gets false treats the line as NOT matching its shape;
     /// reporting a zero would invent a hit the log never recorded.</summary>
     private static bool TryParseAmount(string text, out DamageValue amount)
@@ -668,14 +710,15 @@ public static partial class EnglishGrammar
         var digits = multiplier > 1 ? text[..^1] : text;
         if (!decimal.TryParse(digits.Replace(",", ""), NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out var value))
             return false;
-        // Two range checks, in this order: the first also keeps the
-        // multiplication inside decimal's own range (long.MaxValue times
-        // the largest suffix is about 9.2e27, under decimal's 7.9e28), so
-        // neither the product nor the cast below can overflow.
-        if (value > long.MaxValue)
+        // Two ceiling checks, in this order: the first also keeps the
+        // multiplication inside decimal's own range (the ceiling times the
+        // largest suffix is 1e22, far under decimal's 7.9e28), so neither
+        // the product nor the cast below can overflow. The ceiling is well
+        // inside a long, so it is the only range check needed.
+        if (value > MaxAmount)
             return false;
         var scaled = Math.Round(value * multiplier);
-        if (scaled > long.MaxValue)
+        if (scaled > MaxAmount)
             return false;
         amount = new((long)scaled);
         return true;

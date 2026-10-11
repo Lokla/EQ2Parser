@@ -59,6 +59,11 @@ The server must keep accepting whatever any released client sends.
   one upload and the queue carries on. So a new 403 that is about one upload sends the header with a
   short code, and one that is about the caller's account does not (`REJECT_HEADER` in
   `EQ2Lexicon/backend/server/api/parses/ingest.py` has the rule; `references/wire.md` the client side).
+  A new limit answers 429, which the queue retries: send `Retry-After` with it and the queue waits
+  that long (held to 1 to 120 s) instead of its fixed 30 s. A new shape rule on a field the parser
+  fills from the user's machine (the server folder, the log's character name) means a doomed request
+  per fight until the parser mirrors it: `LogPaths.ServerNamePattern` is the pattern for that, and
+  `references/mirrors.md` has its row.
 - **Rename or removal**: do not. Add the new name and keep reading the old one.
 
 ## 3. Payload-field checklist

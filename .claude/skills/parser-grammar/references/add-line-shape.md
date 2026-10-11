@@ -150,22 +150,35 @@ one `"`.
   `applied`, `released`, `WardAbsorbType` or the cured effect otherwise; `Extra` carries
   `by=<actor>` on avoids and `remaining=<n>` on wards. `LogLineProcessor`,
   `src/EQ2Parser.Core/Analysis/AbilityMiner.cs` and the App's drill and report views test
-  these exact strings. Reuse them; do not invent a near-synonym.
+  these exact strings. Reuse them; do not invent a near-synonym. Three of them are public
+  constants on `EnglishGrammar` and are read through the constant, never retyped:
+  `WardAbsorbType`, `ThreatIncreaseType` (`threat`) and `ThreatReduceType` (`threat-reduce`).
+  `PayloadBuilder.ResistOf` in `src/EQ2Parser.Core/Upload/PayloadBuilder.cs` turns the ward
+  and threat markers into the upload's `resist` text.
 
 ## Amounts
 
-Every pattern with a number uses the same group,
-`(?<amount>[\d,]+(?:\.\d+)?[KMB]?)`, and every builder converts it with
+Every pattern with a number takes it from one constant, `Amount`
+(`\d[\d,]*(?:\.\d+)?[KMB]?`), written as `(?<amount>{Amount})` inside an interpolated
+`[GeneratedRegex($@"...")]`, and every builder converts it with
 `TryParseAmount(m.Groups["amount"].Value, out var amount)`. `TryParseAmount` strips the comma
 grouping, expands a trailing `K`, `M` or `B`, parses as decimal and rounds to a `DamageValue`.
 The game abbreviates amounts of six digits and up (`140.6K`), so a pattern with its own
-`[\d,]+` drops exactly the biggest hits and nothing fails. Copy the group and call
+`[\d,]+` drops exactly the biggest hits and nothing fails. Use `{Amount}` and call
 `TryParseAmount`; that way a fix to one is a fix to all. The ward pattern's `remaining` group
-uses the same form.
+uses the same constant. An interpolated verbatim string needs any literal brace doubled.
+
+An amount starts with a digit. The older group, `[\d,]+`, read `,5` as 5; no real line writes
+one, and a digit-first amount matches exactly as it did before.
 
 `TryParseAmount` is total: it returns false, and never throws, for text the group admits but
-no `long` can hold (commas with no digit, too many digits, an amount that overflows once its
-suffix scales it, non-ASCII digits). The group is loose on purpose and a line's text is not
+that is not a believable amount (too many digits, an amount that overflows once its suffix
+scales it, non-ASCII digits, anything over `EnglishGrammar.MaxAmount`). `MaxAmount` is a
+plausibility ceiling of ten trillion: about ten times the top of the K/M/B notation, and low
+enough that it takes over 900,000 such amounts in one total to overflow a `long`. Without it
+one forged line (a custom emote shaped like a damage line) carrying a number near
+`long.MaxValue` wrapped a combatant's total negative. An amount over the ceiling is refused,
+not clamped. The group is loose on purpose and a line's text is not
 entirely the game's to choose, so this input is reachable. The builders with an amount
 (`Damage`, `Heal`, `PowerReplenish`, `Threat`, `Ward`) therefore return `SwingEvent?`, null
 on a false, and each `TryParse` branch is written

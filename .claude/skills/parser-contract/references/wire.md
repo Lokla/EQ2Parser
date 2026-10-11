@@ -10,7 +10,7 @@ the sibling checkout, written as `EQ2Lexicon/...`.
 
 | Request | Auth | Parser caller | Server handler | Client on failure |
 | --- | --- | --- | --- | --- |
-| `POST /api/parses/ingest` | bearer, signature, gzip | `LexiconUploadClient.UploadAsync`, driven by `UploadQueue` | `ingest_parse` in `EQ2Lexicon/backend/server/api/parses/ingest.py` | network error or 5xx: retry after 5 s, then 30 s. 429: wait 30 s and retry, inside the same three attempts. 401, or 403 without `X-Lexicon-Reject`: pause the queue. 403 with that header: fail this upload and carry on. Any other status: drop the fight, show `detail`. See "Refusals and the reject header". |
+| `POST /api/parses/ingest` | bearer, signature, gzip | `LexiconUploadClient.UploadAsync`, driven by `UploadQueue` | `ingest_parse` in `EQ2Lexicon/backend/server/api/parses/ingest.py` | network error or 5xx: retry after 5 s, then 30 s. 429: wait the response's `Retry-After` (held to 1 to 120 s), or 30 s when it has none, and retry, inside the same three attempts. 401, or 403 without `X-Lexicon-Reject`: pause the queue. 403 with that header: fail this upload and carry on. Any other status: drop the fight, show `detail`. No client at all (the token was cleared with fights queued): nothing is sent, the fight is dropped at once. See "Rate limits and Retry-After" and "Refusals and the reject header". |
 | `POST /api/attendance/ingest` | bearer, signature, gzip | `LexiconUploadClient.UploadAttendanceAsync`, from `UploadService.TickAttendance` | `ingest_attendance` in `EQ2Lexicon/backend/server/api/attendance.py` | result ignored |
 | `GET /api/attendance/mains?character=&server=` | bearer | `LexiconUploadClient.FetchRaidMainsAsync` | `get_raid_mains` in the same module | null, so DKP falls back to the bulk grant |
 | `GET /api/auth/whoami` | bearer | `LexiconUploadClient.WhoAmIAsync` (token test, Raid-tab entitlement probe) | `whoami` in `EQ2Lexicon/backend/server/api/auth_tokens.py` | status 0 means "unknown, probe again"; any HTTP error means "no access" |
@@ -48,9 +48,32 @@ keep it working too; `EQ2Lexicon/tests/server/_parses_ingest_fixtures.py` holds 
   prefix-matches it against `INGEST_CLIENT_LIMITS`, so renaming the product token changes which
   budget applies. The two public GETs go through a different `HttpClient` and send no User-Agent.
 - The client waits 60 s. The server's response path never waits on Census.
-- Rate limits are per token: 60 a minute on parse ingest, 30 a minute on attendance ingest.
+- Rate limits are per token: 60 a minute on parse ingest, 30 a minute on attendance ingest. See
+  "Rate limits and Retry-After".
 - `LexiconUploadClient.UrlProblem` refuses plain http except for loopback, so the token never
   travels in clear text.
+
+## Rate limits and Retry-After
+
+Parse ingest can answer 429 from two places, and only one of them says how long to wait.
+
+| 429 from | Body | `Retry-After` |
+| --- | --- | --- |
+| The per-token limit: the `@limiter.limit` decorator on `ingest_parse`, answered by `_rate_limit_handler` in `EQ2Lexicon/backend/server/app.py` with slowapi's stock response | an `error` key and no `detail`, so the client's message is `Server responded 429` | none: the limiter in `EQ2Lexicon/backend/server/limiter.py` is built without `headers_enabled` |
+| The per-client flood budget: `_client_flood_gate` in the ingest module, counted by `EQ2Lexicon/backend/server/core/client_throttle.py` | a `detail` naming the budget | delta-seconds, at least 1 (`ThrottleVerdict.retry_after`); `_http_exception_handler` keeps the header |
+
+The flood budget applies only to a User-Agent prefix named in `INGEST_CLIENT_LIMITS`
+(`EQ2Lexicon/backend/server/config.py` holds the default; the deployment may set its own). Read it
+to see whether a prefix matches `EQ2Parser/<version>` today. A proxy in front of the site may add
+the header, in either form, to a 429 of its own.
+
+The client reads the header in `LexiconUploadClient.ReadRetryAfter`, in both forms HTTP allows
+(delta-seconds and an HTTP-date), into `UploadResult.RetryAfter`. A header that does not parse, or a
+date that is not in the future, reads as none. `UploadQueue.RateLimitWait` then decides the wait:
+the header's value held between `MinRetryAfter` (1 s) and `MaxRetryAfter` (120 s), or
+`RateLimitDelay` (30 s) when there is none. The drain is held for the whole wait, `Dispose` cancels
+it, and a 429 still draws on the same three attempts as a transient failure. Only a 429 is treated
+this way: a `Retry-After` on any other status is read and not used.
 
 ## Encodings in the parse payload
 
@@ -63,7 +86,7 @@ keep it working too; `EQ2Lexicon/tests/server/_parses_ingest_fixtures.py` holds 
 | Rates | numbers rounded to 2 places (`PayloadBuilder.Rate`) | `_to_float` |
 | `encid` | 8 lowercase hex characters, a hash of the fight (`PayloadBuilder.ComputeEncId`) | `IngestEncounter.encid`, 1 to 16 characters |
 | `logger_name` | the log file's character name (`LogSource.DeriveOwner`) | `CHARACTER_NAME_RE`: letters only, 1 to 15 |
-| `logger_server` | the log's parent directory (`LogPaths.ParseServerName`); never empty on the wire (see below) | required, `WORLD_NAME_RE`, then `ALLOWED_SERVERS` |
+| `logger_server` | the log's parent directory (`LogPaths.ParseServerName`); never empty on the wire, and never a name that fails `LogPaths.IsServerNameAccepted` (see below) | required, `WORLD_NAME_RE` through `sanitize_world`, then `ALLOWED_SERVERS` |
 
 The `_to_*` helpers are in `EQ2Lexicon/backend/server/parses/models.py`; the name patterns are in
 `EQ2Lexicon/backend/server/core/validation.py`.
@@ -77,6 +100,19 @@ a manual upload of it with the same text. `UploadQueue.Enqueue` drops a blank se
 backstop. `UploadService.BuildAttendancePayload` returns null, so neither the attendance snapshot
 nor the mains request is made. Parsers up to v0.5.7 send the empty value and get the 400 for every
 fight.
+
+**A log in a folder that is not named like a server is not uploaded either.** The site checks the
+shape of `logger_server` before it looks at the allow-list: `sanitize_world` strips surrounding
+whitespace and matches `WORLD_NAME_RE`, a letter followed by up to 30 letters, digits, spaces,
+apostrophes, underscores or hyphens (ASCII, either case, 1 to 31 characters). Anything else is a
+400, "logger_server '…' is malformed.", for every fight from that folder. The parser holds the same
+pattern as `LogPaths.ServerNamePattern` and asks `LogPaths.IsServerNameAccepted`, which trims the
+same way. A folder that fails it (`logs/2nd account/`, a name over 31 characters) is handled like
+the missing folder: `ShouldAutoUpload` skips and counts it (`SkippedServerName`) with its own reason
+(string `UploadQ_ServerFolderName`), `UploadFight` refuses it, `Enqueue` drops it and
+`BuildAttendancePayload` returns null. The length is the pattern's. The request model's
+`max_length` on the field is a separate number: read both before relying on either. Parsers up to
+v0.5.7 send such a name and get the 400.
 
 ## What parse ingest checks
 
@@ -121,10 +157,33 @@ What the client does with a refusal is decided in `UploadQueue.SendWithRetryAsyn
 - **The code `server-not-allowed`** (`LexiconUploadClient.RejectServerNotAllowed`) does one thing
   more. The queue stops sending for that `logger_server` for the rest of the session and counts
   what it holds back (`SkippedRefusedServer`), so an alt on a server the site does not accept
-  cannot spend the token's upload budget. `ForgetRefusedServers` clears that memory whenever
-  `UploadService.Configure` builds a client, and on a manual upload.
-- A pause ends when `UploadService.Configure` builds a client (a saved token), when the Test
-  button succeeds, or when the user uploads a fight by hand (`ResetAuthPause`).
+  cannot spend the token's upload budget. That memory is cleared whenever
+  `UploadService.Configure` runs (`UploadQueue.ConfigurationChanged`) and on a manual upload
+  (`ForgetRefusedServers`).
+- A pause ends when `UploadService.Configure` runs (`ConfigurationChanged`), when the Test button
+  succeeds, or when the user uploads a fight by hand (`ResetAuthPause`). Code reads the pause as
+  `UploadQueue.AuthPaused` or `UploadService.UploadsPaused`. The status line is translated, so no
+  word in it is a signal.
+- **An answer from before a reconfigure is stale.** `ConfigurationChanged` starts a new
+  configuration generation, and a send notes the generation it went out under. When a 401 or 403
+  comes back to a send from an older generation, it was the old token's or the old site's answer:
+  it does not pause, does not mark a server refused and does not fail the upload. The upload is
+  sent again under the current configuration, outside the retry budget. `Configure` swaps the
+  client first and calls `ConfigurationChanged` second; that order is what makes every answer from
+  the old client carry an older generation.
+- **No client is not a failure.** When the token is cleared, or the site address fails
+  `UrlProblem`, `UploadService` has no client and its send returns `UploadResult.NoClient` with the
+  reason. Nothing is sent. The queue drops the fight at once, counts it (`SkippedNotConfigured`)
+  and shows the reason; it does not retry, and it does not hold the fight for a later token, which
+  might belong to another account. The fight stays in local history and can be uploaded by hand.
+
+The status lines themselves come from `UploadQueueMessages` in
+`src/EQ2Parser.Core/Upload/UploadQueueMessages.cs` (English, and what the Core tests assert). The
+app passes `UploadService.LocalizedUploadMessages`, which reads each one from an `UploadQ_*` string
+in `src/EQ2Parser.App/Localization/strings.en.json` and its three siblings; the site's `detail` and
+status word are inserted as they arrived. A new line is a new method there, an override in the
+app's class and a key in all four dictionaries
+(`tests/EQ2Parser.App.Tests/UploadServiceStatusLanguageTests.cs` fails when one is missed).
 
 Codes the server sends:
 
@@ -174,6 +233,14 @@ v0.5.7 never read the header and pause on every 401 and 403.
   removed. The engine's amount for a cure swing is still 0; this is the payload only.
 - A row with no damage, hits, misses or blocks is not sent (the ACT plugin's rule). In practice that
   is the "Killing" marker; kills and deaths reach the site in the combatant columns.
+- A combatant row is not sent for a combatant that exists only through swings the upload leaves
+  out (`HasUploadedSwing` in `PayloadBuilder`): every swing it made or received is a status-effect
+  swing. That is the "Unknown" attacker of "X is stunned!", a mob that was only ever stunned, a
+  name whose only logged act was a silence. Builds up to v0.5.7 sent such a row with every figure
+  zero. Allies always keep their row, and so does any combatant that healed, was healed, was hit or
+  attacked, died or cured, so no `damage_types` or attack row is left without its combatant. The
+  combatant stays in the encounter: `encid` is hashed from the encounter's own combatant count
+  (`ComputeEncId`), so the same fight keeps the id it had.
 
 ## Attendance ingest
 
