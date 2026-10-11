@@ -45,8 +45,8 @@ public class EnglishGrammarTests
     public void Suffixless_Decimal_Amount_Parses_Instead_Of_Throwing()
     {
         // The amount pattern admits "1234.6" (decimal, no K/M/B). A plain
-        // long.Parse threw FormatException here — and any parse exception
-        // permanently kills that log's tail loop.
+        // long.Parse threw FormatException here — and at the time any
+        // parse exception permanently killed that log's tail loop.
         var s = Swing("Asame's Assassinate hits Malkonis D'Morte for 1,234.6 disease damage.");
         Assert.Equal(1_235, s.Damage.Number);
     }

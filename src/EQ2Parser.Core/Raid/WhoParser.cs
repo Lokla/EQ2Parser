@@ -99,11 +99,16 @@ public sealed partial class WhoParser
             return result;
         }
         var detail = DetailRowRegex().Match(message);
-        if (detail.Success)
+        // TryParse, not Parse: \d+ admits a level too long for an int (and
+        // non-ASCII digits), and a throw here is a throw on the log-line
+        // path. A row whose level cannot be read is not a /who row.
+        if (detail.Success
+            && int.TryParse(detail.Groups["level"].Value, System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture, out var level))
         {
             _rows.Add(new WhoRow(
                 detail.Groups["name"].Value,
-                int.Parse(detail.Groups["level"].Value, System.Globalization.CultureInfo.InvariantCulture),
+                level,
                 detail.Groups["cls"].Value,
                 detail.Groups["race"].Value,
                 detail.Groups["guild"].Success ? detail.Groups["guild"].Value : null,

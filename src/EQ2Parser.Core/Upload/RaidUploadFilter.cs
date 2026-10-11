@@ -16,9 +16,11 @@ namespace EQ2Parser.Core.Upload;
 ///    curators have not added yet.
 ///
 /// Boss names are compared after <see cref="NormaliseBossName"/>, a mirror
-/// of the site's <c>_normalise_boss_key</c> (rankings.py): lowercase, NFC,
-/// every apostrophe look-alike folded to <c>'</c>, odd spaces to a plain
-/// space, trimmed. Keep the two in step or names silently stop matching.
+/// of the site's <c>boss_key</c> (backend/server/parses/boss.py; rankings.py
+/// still imports it under its old name, <c>_normalise_boss_key</c>): NFC,
+/// lowercase, every apostrophe look-alike folded to <c>'</c>, odd spaces to
+/// a plain space, trimmed. Keep the two in step or names silently stop
+/// matching — the fold table below is the site's, row for row.
 /// </summary>
 public static class RaidUploadFilter
 {
@@ -28,25 +30,36 @@ public static class RaidUploadFilter
     /// classified out, never lower).</summary>
     public const int RaidMinPlayers = 7;
 
+    // One row per code point, in the order of the site's table
+    // (_APOSTROPHE_VARIANTS in parses/boss.py) so the two read side by
+    // side: fifteen apostrophe look-alikes, then six space look-alikes.
+    // The keys are \u escapes on purpose — several of these characters
+    // are invisible in an editor, and a literal no-break space reads as a
+    // row that folds a space to a space. RaidUploadFilterTests carries
+    // the same list, so a row added on one side only fails a test.
     private static readonly Dictionary<char, char> Folds = new()
     {
-        ['`'] = '\'',        // U+0060 GRAVE ACCENT
-        ['´'] = '\'',   // ACUTE ACCENT
-        ['ʹ'] = '\'',   // MODIFIER LETTER PRIME
-        ['ʺ'] = '\'',   // MODIFIER LETTER DOUBLE PRIME
-        ['ʻ'] = '\'',   // MODIFIER LETTER TURNED COMMA
-        ['ʼ'] = '\'',   // MODIFIER LETTER APOSTROPHE
-        ['ʽ'] = '\'',   // MODIFIER LETTER REVERSED COMMA
-        ['ʾ'] = '\'',   // MODIFIER LETTER RIGHT HALF RING
-        ['ʿ'] = '\'',   // MODIFIER LETTER LEFT HALF RING
-        ['ˈ'] = '\'',   // MODIFIER LETTER VERTICAL LINE
-        ['‘'] = '\'',   // LEFT SINGLE QUOTATION MARK
-        ['’'] = '\'',   // RIGHT SINGLE QUOTATION MARK
-        ['‛'] = '\'',   // SINGLE HIGH-REVERSED-9 QUOTATION MARK
-        ['′'] = '\'',   // PRIME
-        ['＇'] = '\'',   // FULLWIDTH APOSTROPHE
-        [' '] = ' ',    // NO-BREAK SPACE
-        [' '] = ' ',    // THIN SPACE
+        ['\u0060'] = '\'', // GRAVE ACCENT
+        ['\u00B4'] = '\'', // ACUTE ACCENT
+        ['\u02B9'] = '\'', // MODIFIER LETTER PRIME
+        ['\u02BA'] = '\'', // MODIFIER LETTER DOUBLE PRIME
+        ['\u02BB'] = '\'', // MODIFIER LETTER TURNED COMMA
+        ['\u02BC'] = '\'', // MODIFIER LETTER APOSTROPHE
+        ['\u02BD'] = '\'', // MODIFIER LETTER REVERSED COMMA
+        ['\u02BE'] = '\'', // MODIFIER LETTER RIGHT HALF RING
+        ['\u02BF'] = '\'', // MODIFIER LETTER LEFT HALF RING
+        ['\u02C8'] = '\'', // MODIFIER LETTER VERTICAL LINE
+        ['\u2018'] = '\'', // LEFT SINGLE QUOTATION MARK
+        ['\u2019'] = '\'', // RIGHT SINGLE QUOTATION MARK
+        ['\u201B'] = '\'', // SINGLE HIGH-REVERSED-9 QUOTATION MARK
+        ['\u2032'] = '\'', // PRIME
+        ['\uFF07'] = '\'', // FULLWIDTH APOSTROPHE
+        ['\u00A0'] = ' ',   // NO-BREAK SPACE
+        ['\u2009'] = ' ',   // THIN SPACE
+        ['\u200A'] = ' ',   // HAIR SPACE
+        ['\u202F'] = ' ',   // NARROW NO-BREAK SPACE
+        ['\u205F'] = ' ',   // MEDIUM MATHEMATICAL SPACE
+        ['\u3000'] = ' ',   // IDEOGRAPHIC SPACE
     };
 
     /// <summary>The site's boss-key shape for a mob name (see the class

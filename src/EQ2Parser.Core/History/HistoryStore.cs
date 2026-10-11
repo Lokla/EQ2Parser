@@ -47,24 +47,54 @@ public sealed class HistoryStore : IDisposable
         Execute("PRAGMA foreign_keys=ON");
         // Migrations run BEFORE the idempotent schema pass — a new index may
         // reference a column the migration adds.
-        Migrate(CurrentVersion());
+        var storedVersion = StoredVersion();
+        Migrate();
         CreateSchema();
+        StampVersion(storedVersion);
     }
 
-    private int CurrentVersion()
+    private int StoredVersion()
     {
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = "PRAGMA user_version;";
         return Convert.ToInt32(cmd.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
     }
 
-    /// <summary>Upgrade an older database in place — v1 lacked is_boss;
-    /// backfill it from the same named-mob rule the classifier uses.</summary>
-    private void Migrate(int fromVersion)
+    /// <summary>Upgrade an older database in place: give the file every
+    /// column this build's statements name and it does not have yet.
+    ///
+    /// Keyed on the table's ACTUAL columns, never on the stored version. The
+    /// version cannot be trusted downward: every build up to v0.5.7 stamps
+    /// its own number on every open, so running an older build once (a
+    /// portable copy, a rollback, a second install) lowers the stamp on a
+    /// file that keeps its newer shape. Steps keyed on that stamp then ran
+    /// ADD COLUMN a second time, SQLite answered "duplicate column name",
+    /// the constructor threw, and the app could not start — with the fight
+    /// archive intact on disk and unreachable. Those builds are released
+    /// and will keep stamping downward, so the rule for every step here,
+    /// present and future, is: SAFE TO RUN ON A FILE THAT ALREADY HAS IT.
+    /// Ask the file what it holds; do not ask the stamp what it should hold.
+    ///
+    /// A step that is more than ADD COLUMN (a backfill, a rewrite of stored
+    /// values) hangs off the column check that introduced it, inside the
+    /// one transaction below, so "the column exists" always means "and its
+    /// backfill ran" — a crash between the two leaves neither.</summary>
+    private void Migrate()
     {
-        if (fromVersion == 1)
+        var columns = ColumnNames("encounters");
+        // A brand-new file: no table to alter. CreateSchema builds the
+        // current shape outright (ALTER here would fail on "no such table").
+        if (columns.Count == 0)
+            return;
+
+        List<string> steps = [];
+        // v2: is_boss, backfilled from the same named-mob rule the
+        // classifier uses. The backfill belongs to the column's CREATION
+        // only: on a file that already has is_boss the stored verdicts are
+        // the truth and must not be rewritten from the title.
+        if (!columns.Contains("is_boss"))
         {
-            Execute("""
+            steps.Add("""
                 ALTER TABLE encounters ADD COLUMN is_boss INTEGER NOT NULL DEFAULT 0;
                 UPDATE encounters SET is_boss = 1
                  WHERE title <> 'Encounter'
@@ -74,8 +104,63 @@ public sealed class HistoryStore : IDisposable
         }
         // v3: zone-instance identity (lockout expiry). Old rows stay NULL —
         // grouping treats null as compatible with anything.
-        if (fromVersion is 1 or 2)
-            Execute("ALTER TABLE encounters ADD COLUMN zone_instance_expiry INTEGER;");
+        if (!columns.Contains("zone_instance_expiry"))
+            steps.Add("ALTER TABLE encounters ADD COLUMN zone_instance_expiry INTEGER;");
+
+        // The usual open finds nothing to do and must not take the write
+        // lock to learn that.
+        if (steps.Count == 0)
+            return;
+        using var tx = _conn.BeginTransaction();
+        foreach (var step in steps)
+            Execute(step, tx);
+        tx.Commit();
+    }
+
+    /// <summary>The table's column names as the file has them now; empty
+    /// when the table does not exist. SQLite compares column names without
+    /// regard to case, so the set does too.</summary>
+    private HashSet<string> ColumnNames(string table)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT name FROM pragma_table_info($table);";
+        cmd.Parameters.AddWithValue("$table", table);
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+            names.Add(reader.GetString(0));
+        return names;
+    }
+
+    /// <summary>Raise the file's version to this build's — and NEVER lower
+    /// it. A file stamped higher was written by a newer build; stamping it
+    /// down is what set up the startup failure described on
+    /// <see cref="Migrate"/> for the build that returns to it.
+    ///
+    /// Such a file is still opened read/write, on purpose:
+    ///  * every statement in this class names its columns (no SELECT *, no
+    ///    positional INSERT), so columns, tables and indexes a newer build
+    ///    added are simply invisible here;
+    ///  * a row this build saves takes the default for any newer column —
+    ///    the same "old rows stay NULL" contract each migration already
+    ///    gives the rows that predate it;
+    ///  * deletes cascade by the file's own foreign keys, newer child
+    ///    tables included;
+    ///  * the alternatives are worse for the person in that seat. They are
+    ///    usually on the older build because the newer one let them down;
+    ///    opening read-only would silently drop every fight of the session,
+    ///    and refusing to open is the startup failure all over again.
+    ///
+    /// That holds only while schema changes stay ADDITIVE — new nullable or
+    /// defaulted columns, new tables, new indexes. A change that removes or
+    /// renames something, or changes what an existing column means, breaks
+    /// every released build that opens the file afterwards, and bumping the
+    /// version does not protect them (they never look). It needs its own
+    /// plan — a new file name, at the least.</summary>
+    private void StampVersion(int storedVersion)
+    {
+        if (storedVersion < SchemaVersion)
+            Execute($"PRAGMA user_version = {SchemaVersion};");
     }
 
     public void Dispose() => _conn.Dispose();
@@ -90,9 +175,13 @@ public sealed class HistoryStore : IDisposable
         _conn.BackupDatabase(destination);
     }
 
+    /// <summary>The whole current shape, idempotently: creates what a new
+    /// file lacks and leaves an existing table exactly as it is (bringing
+    /// one of those up to date is <see cref="Migrate"/>'s job). It does not
+    /// touch the version stamp — see <see cref="StampVersion"/>.</summary>
     private void CreateSchema()
     {
-        Execute($"""
+        Execute("""
             CREATE TABLE IF NOT EXISTS encounters (
                 id             INTEGER PRIMARY KEY AUTOINCREMENT,
                 source_id      TEXT NOT NULL,
@@ -143,8 +232,6 @@ public sealed class HistoryStore : IDisposable
                 observed_at_ms INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_swings_encounter ON swings(encounter_id, time_sorter);
-
-            PRAGMA user_version = {SchemaVersion};
             """);
     }
 
@@ -412,6 +499,16 @@ public sealed class HistoryStore : IDisposable
         return cmd.ExecuteNonQuery();
     }
 
+    /// <summary>Does the archive hold any fight at all? What the shutdown
+    /// snapshot asks before it rotates the backups: an empty archive has
+    /// nothing to protect and must not displace one that did.</summary>
+    public bool HasEncounters()
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT EXISTS (SELECT 1 FROM encounters);";
+        return Convert.ToInt64(cmd.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) != 0;
+    }
+
     /// <summary>Stored swing count — the richer-data check for re-parse
     /// upgrades (new grammar shapes add swings old saves lack).</summary>
     public int CountSwings(long encounterId)
@@ -430,9 +527,10 @@ public sealed class HistoryStore : IDisposable
         return cmd.ExecuteNonQuery() > 0;
     }
 
-    private void Execute(string sql)
+    private void Execute(string sql, SqliteTransaction? transaction = null)
     {
         using var cmd = _conn.CreateCommand();
+        cmd.Transaction = transaction;
         cmd.CommandText = sql;
         cmd.ExecuteNonQuery();
     }

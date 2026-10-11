@@ -29,6 +29,14 @@ public readonly record struct LogLine(long Epoch, string Message)
         var closeParen = raw.IndexOf(')');
         if (closeParen < 2 || !long.TryParse(raw[1..closeParen], out var epoch))
             return false;
+        // A number that parses is not yet a time: Timestamp converts with
+        // DateTimeOffset.FromUnixTimeSeconds, which THROWS outside the
+        // years 1..9999. A corrupt or forged prefix such as
+        // "(999999999999999999)[x] ..." is therefore "not an EQ2 line",
+        // the same as any other malformed prefix, rather than a line that
+        // blows up the first time something asks it what time it is.
+        if (epoch < MinEpoch || epoch > MaxEpoch)
+            return false;
 
         var rest = raw[(closeParen + 1)..];
         if (rest.Length < 3 || rest[0] != '[')
@@ -42,6 +50,11 @@ public readonly record struct LogLine(long Epoch, string Message)
         line = new LogLine(epoch, message.ToString());
         return true;
     }
+
+    /// <summary>The epoch range <see cref="Timestamp"/> can represent
+    /// (0001-01-01 to 9999-12-31 UTC). TryParse refuses anything outside it.</summary>
+    private static readonly long MinEpoch = DateTimeOffset.MinValue.ToUnixTimeSeconds();
+    private static readonly long MaxEpoch = DateTimeOffset.MaxValue.ToUnixTimeSeconds();
 
     public DateTimeOffset Timestamp => DateTimeOffset.FromUnixTimeSeconds(Epoch);
 }

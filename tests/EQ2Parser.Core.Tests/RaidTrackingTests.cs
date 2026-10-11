@@ -37,6 +37,22 @@ public sealed class RaidTrackingTests
         Assert.Null(result.Rows[1].Level);         // anonymous rows carry name only
     }
 
+    // \d+ admits a level no int can hold; int.Parse threw on it, on the
+    // log-line path. Such a row is simply not a /who row.
+    [Fact]
+    public void Who_Row_With_An_Unreadable_Level_Is_Ignored_Not_Thrown()
+    {
+        var p = new WhoParser();
+        Assert.Null(p.Feed("/who search results:", T0));
+        Assert.Null(p.Feed("[99999999999 Fury] Tester (Arasai) Zone: Somewhere", T0));
+        Assert.Null(p.Feed("[70 Fury] Other (Arasai) Zone: Somewhere", T0));
+        var result = p.Feed("1 player found", T0);
+
+        Assert.NotNull(result);
+        var row = Assert.Single(result.Rows);
+        Assert.Equal(("Other", 70), (row.Name, row.Level));
+    }
+
     [Fact]
     public void Who_Singular_Footer_And_Plain_Header()
     {

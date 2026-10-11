@@ -244,7 +244,12 @@ public static partial class EnglishGrammar
         //     text — most of a real log) used to walk ~20 lazy-dot regexes
         //     and backtrack through each; now it costs a handful of
         //     Contains/EndsWith scans and zero regex work.
+        // And one rule governs every branch that carries a number: the
+        // builder returns null when the amount cannot be represented (see
+        // TryParseAmount), and the branch then FALLS THROUGH exactly as if
+        // its pattern had not matched. Never a throw, never a made-up zero.
         Match m;
+        SwingEvent? swing;
 
         if (message.EndsWith(" damage.", StringComparison.Ordinal))
         {
@@ -259,20 +264,25 @@ public static partial class EnglishGrammar
             }
             else
             {
-                if ((m = YourAbilityDamage().Match(message)).Success)
-                    return Damage(m, You, m.Groups["ability"].Value);
-                if ((m = YouAutoDamage().Match(message)).Success)
-                    return Damage(m, You, AutoAttackAbility);
+                if ((m = YourAbilityDamage().Match(message)).Success
+                    && (swing = Damage(m, You, m.Groups["ability"].Value)) is not null)
+                    return swing;
+                if ((m = YouAutoDamage().Match(message)).Success
+                    && (swing = Damage(m, You, AutoAttackAbility)) is not null)
+                    return swing;
                 // Anonymous before possessive: "Bob's pet is hit by Acid
                 // Spray for 447 poison damage." otherwise phantom-parses as
                 // attacker "Bob", ability "pet is", victim "by Acid Spray".
                 if (message.Contains(" is hit by ", StringComparison.Ordinal)
-                    && (m = AnonymousHit().Match(message)).Success)
-                    return Damage(m, "Unknown", m.Groups["ability"].Value);
-                if ((m = PossessiveAbilityDamage().Match(message)).Success)
-                    return Damage(m, m.Groups["attacker"].Value, m.Groups["ability"].Value);
-                if ((m = PlainDamage().Match(message)).Success)
-                    return Damage(m, m.Groups["attacker"].Value, AutoAttackAbility);
+                    && (m = AnonymousHit().Match(message)).Success
+                    && (swing = Damage(m, "Unknown", m.Groups["ability"].Value)) is not null)
+                    return swing;
+                if ((m = PossessiveAbilityDamage().Match(message)).Success
+                    && (swing = Damage(m, m.Groups["attacker"].Value, m.Groups["ability"].Value)) is not null)
+                    return swing;
+                if ((m = PlainDamage().Match(message)).Success
+                    && (swing = Damage(m, m.Groups["attacker"].Value, AutoAttackAbility)) is not null)
+                    return swing;
             }
         }
         if (message.Contains(" tries to ", StringComparison.Ordinal)
@@ -280,34 +290,42 @@ public static partial class EnglishGrammar
             return Avoid(m);
         if (message.Contains(" heals ", StringComparison.Ordinal))
         {
-            if ((m = YourHeal().Match(message)).Success)
-                return Heal(m, You);
-            if ((m = PossessiveHeal().Match(message)).Success)
-                return Heal(m, m.Groups["attacker"].Value);
+            if ((m = YourHeal().Match(message)).Success
+                && (swing = Heal(m, You)) is not null)
+                return swing;
+            if ((m = PossessiveHeal().Match(message)).Success
+                && (swing = Heal(m, m.Groups["attacker"].Value)) is not null)
+                return swing;
         }
         if (message.StartsWith("YOU try to ", StringComparison.Ordinal)
             && (m = YouAvoid().Match(message)).Success)
             return AvoidFrom(m, You);
         if (message.Contains(" absorbs ", StringComparison.Ordinal))
         {
-            if ((m = YourWardAbsorb().Match(message)).Success)
-                return Ward(m, You);
-            if ((m = WardAbsorb().Match(message)).Success)
-                return Ward(m, m.Groups["attacker"].Value);
+            if ((m = YourWardAbsorb().Match(message)).Success
+                && (swing = Ward(m, You)) is not null)
+                return swing;
+            if ((m = WardAbsorb().Match(message)).Success
+                && (swing = Ward(m, m.Groups["attacker"].Value)) is not null)
+                return swing;
         }
         if (message.Contains(" refreshes ", StringComparison.Ordinal))
         {
-            if ((m = YourPowerRefresh().Match(message)).Success)
-                return PowerReplenish(m, You);
-            if ((m = PowerRefresh().Match(message)).Success)
-                return PowerReplenish(m, m.Groups["attacker"].Value);
+            if ((m = YourPowerRefresh().Match(message)).Success
+                && (swing = PowerReplenish(m, You)) is not null)
+                return swing;
+            if ((m = PowerRefresh().Match(message)).Success
+                && (swing = PowerReplenish(m, m.Groups["attacker"].Value)) is not null)
+                return swing;
         }
         if (message.Contains(" hate with ", StringComparison.Ordinal))
         {
-            if ((m = YourThreatChange().Match(message)).Success)
-                return Threat(m, You);
-            if ((m = ThreatChange().Match(message)).Success)
-                return Threat(m, m.Groups["attacker"].Value);
+            if ((m = YourThreatChange().Match(message)).Success
+                && (swing = Threat(m, You)) is not null)
+                return swing;
+            if ((m = ThreatChange().Match(message)).Success
+                && (swing = Threat(m, m.Groups["attacker"].Value)) is not null)
+                return swing;
         }
         if (message.Contains(" relieves ", StringComparison.Ordinal))
         {
@@ -399,26 +417,40 @@ public static partial class EnglishGrammar
         var parts = body.Split(' ', StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length is 0 or > 6 || parts.Length % 2 != 0)
             return null;
-        var total = TimeSpan.Zero;
+        // Summed in whole minutes as a long, never as TimeSpans: the count
+        // is whatever the line says, and TimeSpan.FromDays(99999999) THROWS
+        // (so did adding two large spans). At most three int-sized counts
+        // times 1,440 stays far inside a long, so nothing here can overflow.
+        long totalMinutes = 0;
         for (var i = 0; i < parts.Length; i += 2)
         {
-            if (!int.TryParse(parts[i], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var n))
+            if (!int.TryParse(parts[i], NumberStyles.None, CultureInfo.InvariantCulture, out var n))
                 return null;
-            total += parts[i + 1].TrimEnd('s') switch
+            long minutesPerUnit = parts[i + 1].TrimEnd('s') switch
             {
-                "day" => TimeSpan.FromDays(n),
-                "hour" => TimeSpan.FromHours(n),
-                "minute" => TimeSpan.FromMinutes(n),
-                _ => TimeSpan.MinValue,
+                "day" => 24 * 60,
+                "hour" => 60,
+                "minute" => 1,
+                _ => 0,
             };
-            if (total < TimeSpan.Zero)
+            if (minutesPerUnit == 0)
                 return null;
+            totalMinutes += n * minutesPerUnit;
         }
-        return total > TimeSpan.Zero ? total : null;
+        return totalMinutes is > 0 and <= MaxLockoutMinutes ? TimeSpan.FromMinutes(totalMinutes) : null;
     }
 
-    private static SwingEvent Damage(Match m, string attacker, string ability)
+    /// <summary>Ceiling on a believable lockout: a year, where the real ones
+    /// run to days. Not a statement about the game's longest lockout — it is
+    /// there because the caller adds the result to the line's timestamp, and
+    /// a span that merely FITS a TimeSpan (millions of days) would throw on
+    /// that addition instead. Anything longer is "a wrong lockout": null.</summary>
+    private const long MaxLockoutMinutes = 366L * 24 * 60;
+
+    private static SwingEvent? Damage(Match m, string attacker, string ability)
     {
+        if (!TryParseAmount(m.Groups["amount"].Value, out var amount))
+            return null;
         var school = m.Groups["school"].Value;
         // Auto-attack vs skill follows the ABILITY alone, never the school:
         // named abilities are skills even when they deal
@@ -437,20 +469,23 @@ public static partial class EnglishGrammar
             Special: special,
             Attacker: attacker,
             Ability: ability,
-            Damage: ParseAmount(m.Groups["amount"].Value),
+            Damage: amount,
             Victim: m.Groups["victim"].Value,
             DamageType: school);
     }
 
-    private static SwingEvent Heal(Match m, string attacker) => new(
-        SwingCategory.Healing,
-        Critical: m.Groups["crit"].Success,
-        Special: "None",
-        Attacker: attacker,
-        Ability: m.Groups["ability"].Value,
-        Damage: ParseAmount(m.Groups["amount"].Value),
-        Victim: m.Groups["victim"].Value,
-        DamageType: "heal");
+    private static SwingEvent? Heal(Match m, string attacker) =>
+        TryParseAmount(m.Groups["amount"].Value, out var amount)
+            ? new(
+                SwingCategory.Healing,
+                Critical: m.Groups["crit"].Success,
+                Special: "None",
+                Attacker: attacker,
+                Ability: m.Groups["ability"].Value,
+                Damage: amount,
+                Victim: m.Groups["victim"].Value,
+                DamageType: "heal")
+            : null;
 
     private static SwingEvent NoDamageHit(Match m, string attacker, string ability) => new(
         ability == AutoAttackAbility ? SwingCategory.Melee : SwingCategory.NonMelee,
@@ -462,25 +497,31 @@ public static partial class EnglishGrammar
         Victim: m.Groups["victim"].Value,
         DamageType: "none");
 
-    private static SwingEvent PowerReplenish(Match m, string attacker) => new(
-        SwingCategory.PowerReplenish,
-        Critical: false,
-        Special: "None",
-        Attacker: attacker,
-        Ability: m.Groups["ability"].Value,
-        Damage: ParseAmount(m.Groups["amount"].Value),
-        Victim: m.Groups["victim"].Value,
-        DamageType: "power");
+    private static SwingEvent? PowerReplenish(Match m, string attacker) =>
+        TryParseAmount(m.Groups["amount"].Value, out var amount)
+            ? new(
+                SwingCategory.PowerReplenish,
+                Critical: false,
+                Special: "None",
+                Attacker: attacker,
+                Ability: m.Groups["ability"].Value,
+                Damage: amount,
+                Victim: m.Groups["victim"].Value,
+                DamageType: "power")
+            : null;
 
-    private static SwingEvent Threat(Match m, string attacker) => new(
-        SwingCategory.Threat,
-        Critical: false,
-        Special: "None",
-        Attacker: attacker,
-        Ability: m.Groups["ability"].Value,
-        Damage: ParseAmount(m.Groups["amount"].Value),
-        Victim: m.Groups["victim"].Value,
-        DamageType: m.Groups["direction"].Value == "reduces" ? "threat-reduce" : "threat");
+    private static SwingEvent? Threat(Match m, string attacker) =>
+        TryParseAmount(m.Groups["amount"].Value, out var amount)
+            ? new(
+                SwingCategory.Threat,
+                Critical: false,
+                Special: "None",
+                Attacker: attacker,
+                Ability: m.Groups["ability"].Value,
+                Damage: amount,
+                Victim: m.Groups["victim"].Value,
+                DamageType: m.Groups["direction"].Value == "reduces" ? "threat-reduce" : "threat")
+            : null;
 
     private static SwingEvent Status(string victim, string effect, bool applied, string attacker = "Unknown") => new(
         SwingCategory.StatusEffect,
@@ -502,11 +543,27 @@ public static partial class EnglishGrammar
         Victim: m.Groups["victim"].Value,
         DamageType: m.Groups["effect"].Value);
 
-    private static SwingEvent Ward(Match m, string attacker) => new(
-        SwingCategory.Healing, false, "None",
-        attacker, m.Groups["ability"].Value,
-        ParseAmount(m.Groups["amount"].Value), m.Groups["victim"].Value, WardAbsorbType,
-        Extra: m.Groups["remaining"].Success ? $"remaining={ParseAmount(m.Groups["remaining"].Value).Number}" : null);
+    private static SwingEvent? Ward(Match m, string attacker)
+    {
+        if (!TryParseAmount(m.Groups["amount"].Value, out var absorbed))
+            return null;
+        // The "(N points remaining)" suffix is optional, but when it is
+        // there it has to read as a number too: a line with one good count
+        // and one impossible one is not a line the game wrote, so the whole
+        // shape is refused rather than kept with a guessed remainder.
+        string? extra = null;
+        if (m.Groups["remaining"].Success)
+        {
+            if (!TryParseAmount(m.Groups["remaining"].Value, out var remaining))
+                return null;
+            extra = $"remaining={remaining.Number}";
+        }
+        return new(
+            SwingCategory.Healing, false, "None",
+            attacker, m.Groups["ability"].Value,
+            absorbed, m.Groups["victim"].Value, WardAbsorbType,
+            Extra: extra);
+    }
 
     private static SwingEvent Avoid(Match m) => AvoidFrom(m, m.Groups["attacker"].Value);
 
@@ -576,9 +633,26 @@ public static partial class EnglishGrammar
 
     /// <summary>EQ2 abbreviates six-digit-plus amounts in the log —
     /// "140.6K disease damage", "1.2M" — so a plain integer parse silently
-    /// DROPPED every big crit (ACT expands the suffix; so do we).</summary>
-    private static DamageValue ParseAmount(string text)
+    /// DROPPED every big crit (ACT expands the suffix; so do we).
+    ///
+    /// TOTAL by contract: false, never an exception, for anything that is
+    /// not an amount a long can hold. The amount pattern is deliberately
+    /// loose ([\d,]+ with an optional decimal and suffix), so it admits
+    /// text no number parser accepts — and a line's text is not entirely
+    /// the game's to choose (a custom emote can end in " damage."), so
+    /// this is reachable input, not theory. What the pattern lets through
+    /// that is refused here:
+    ///   * commas with no digit at all (","),
+    ///   * more digits than a long (or a decimal) holds,
+    ///   * an amount that fits until its K/M/B suffix scales it,
+    ///   * non-ASCII digits (\d matches every Unicode decimal digit).
+    /// A caller that gets false treats the line as NOT matching its shape;
+    /// reporting a zero would invent a hit the log never recorded.</summary>
+    private static bool TryParseAmount(string text, out DamageValue amount)
     {
+        amount = default;
+        if (text.Length == 0)
+            return false;
         var multiplier = text[^1] switch
         {
             'K' => 1_000L,
@@ -587,11 +661,23 @@ public static partial class EnglishGrammar
             _ => 1L,
         };
         // The amount regex admits decimals with OR without a suffix
-        // ("1234.5") — a plain long.Parse on that throws, and any parse
-        // exception here kills the log's tail loop. decimal keeps full
+        // ("1234.5") — a plain long.Parse on that throws, and a throw on
+        // the line path costs the line (it once cost the whole log's tail
+        // loop; LogSource now skips the line instead). decimal keeps full
         // precision for plain integer amounts.
         var digits = multiplier > 1 ? text[..^1] : text;
-        var value = decimal.Parse(digits.Replace(",", ""), CultureInfo.InvariantCulture);
-        return new((long)Math.Round(value * multiplier));
+        if (!decimal.TryParse(digits.Replace(",", ""), NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out var value))
+            return false;
+        // Two range checks, in this order: the first also keeps the
+        // multiplication inside decimal's own range (long.MaxValue times
+        // the largest suffix is about 9.2e27, under decimal's 7.9e28), so
+        // neither the product nor the cast below can overflow.
+        if (value > long.MaxValue)
+            return false;
+        var scaled = Math.Round(value * multiplier);
+        if (scaled > long.MaxValue)
+            return false;
+        amount = new((long)scaled);
+        return true;
     }
 }

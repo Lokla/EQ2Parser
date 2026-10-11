@@ -3,8 +3,9 @@ using EQ2Parser.Core.Upload;
 namespace EQ2Parser.Core.Tests;
 
 /// <summary>The raid-only upload rule and its boss-name normaliser (a
-/// mirror of the site's _normalise_boss_key — the vectors here are the
-/// site's own cases, so a drift on either side shows up as a test).</summary>
+/// mirror of the site's boss_key in parses/boss.py, which rankings.py still
+/// aliases as _normalise_boss_key — the vectors here are the site's own
+/// cases, so a drift on either side shows up as a test).</summary>
 public class RaidUploadFilterTests
 {
     [Theory]
@@ -18,6 +19,59 @@ public class RaidUploadFilterTests
     [InlineData("Lord Vyemm", "lord vyemm")]                // thin space
     [InlineData("trakanon", "trakanon")]                         // idempotent
     public void NormaliseBossName_Matches_The_Site_Key_Shape(string input, string expected) =>
+        Assert.Equal(expected, RaidUploadFilter.NormaliseBossName(input));
+
+    // The four space look-alikes the site folded and the parser did not: a
+    // boss whose name carried one INSIDE it (Trim only ever covered the
+    // ends) keyed differently on the two sides and silently missed the
+    // raid-boss list. Written as escapes — the characters are invisible.
+    [Theory]
+    [InlineData("Lord Vyemm")]   // U+200A HAIR SPACE
+    [InlineData("Lord Vyemm")]   // U+202F NARROW NO-BREAK SPACE
+    [InlineData("Lord Vyemm")]   // U+205F MEDIUM MATHEMATICAL SPACE
+    [InlineData("Lord　Vyemm")]   // U+3000 IDEOGRAPHIC SPACE
+    [InlineData("　Lord Vyemm ")] // and at the ends, where they trim away
+    public void NormaliseBossName_Folds_The_Wider_Space_Set(string input) =>
+        Assert.Equal("lord vyemm", RaidUploadFilter.NormaliseBossName(input));
+
+    // The whole table, one row per code point, in the order of the site's
+    // _APOSTROPHE_VARIANTS (parses/boss.py). A row added there and not here
+    // is the drift this test exists to make visible: add it to both.
+    [Theory]
+    [InlineData('`', '\'')] // GRAVE ACCENT
+    [InlineData('´', '\'')] // ACUTE ACCENT
+    [InlineData('ʹ', '\'')] // MODIFIER LETTER PRIME
+    [InlineData('ʺ', '\'')] // MODIFIER LETTER DOUBLE PRIME
+    [InlineData('ʻ', '\'')] // MODIFIER LETTER TURNED COMMA
+    [InlineData('ʼ', '\'')] // MODIFIER LETTER APOSTROPHE
+    [InlineData('ʽ', '\'')] // MODIFIER LETTER REVERSED COMMA
+    [InlineData('ʾ', '\'')] // MODIFIER LETTER RIGHT HALF RING
+    [InlineData('ʿ', '\'')] // MODIFIER LETTER LEFT HALF RING
+    [InlineData('ˈ', '\'')] // MODIFIER LETTER VERTICAL LINE
+    [InlineData('‘', '\'')] // LEFT SINGLE QUOTATION MARK
+    [InlineData('’', '\'')] // RIGHT SINGLE QUOTATION MARK
+    [InlineData('‛', '\'')] // SINGLE HIGH-REVERSED-9 QUOTATION MARK
+    [InlineData('′', '\'')] // PRIME
+    [InlineData('＇', '\'')] // FULLWIDTH APOSTROPHE
+    [InlineData(' ', ' ')]  // NO-BREAK SPACE
+    [InlineData(' ', ' ')]  // THIN SPACE
+    [InlineData(' ', ' ')]  // HAIR SPACE
+    [InlineData(' ', ' ')]  // NARROW NO-BREAK SPACE
+    [InlineData(' ', ' ')]  // MEDIUM MATHEMATICAL SPACE
+    [InlineData('　', ' ')]  // IDEOGRAPHIC SPACE
+    public void NormaliseBossName_Folds_Every_Code_Point_The_Site_Folds(char variant, char folded) =>
+        Assert.Equal($"vy{folded}emm", RaidUploadFilter.NormaliseBossName($"Vy{variant}emm"));
+
+    [Theory]
+    // Deliberately NOT folded on either side — a plain apostrophe and a
+    // plain space pass through, and so do look-alikes outside the table
+    // (a double quote, an en space): the two sides must agree on what is
+    // left alone as much as on what is folded.
+    [InlineData("Vy'emm", "vy'emm")]
+    [InlineData("Vy emm", "vy emm")]
+    [InlineData("Vy\"emm", "vy\"emm")]
+    [InlineData("Vy emm", "vy emm")] // U+2002 EN SPACE
+    public void NormaliseBossName_Leaves_Everything_Else_Alone(string input, string expected) =>
         Assert.Equal(expected, RaidUploadFilter.NormaliseBossName(input));
 
     [Fact]
@@ -46,6 +100,18 @@ public class RaidUploadFilterTests
         Assert.True(RaidUploadFilter.IsRaidEncounter("Vyemm’s Shade", 3, bosses)); // curly on the log side
         Assert.False(RaidUploadFilter.IsRaidEncounter("Lord Bob", 6, bosses));
         Assert.False(RaidUploadFilter.IsRaidEncounter("a krait warrior", 6, bosses));
+    }
+
+    [Fact]
+    public void Curated_Boss_Matches_Through_An_Odd_Space_In_The_Log_Title()
+    {
+        // The list arrives already normalised by the site; the log side
+        // carries whatever the client wrote between the words.
+        var bosses = new HashSet<string>(StringComparer.Ordinal) { "lord vyemm" };
+        Assert.True(RaidUploadFilter.IsRaidEncounter("Lord Vyemm", 2, bosses)); // narrow no-break space
+        Assert.True(RaidUploadFilter.IsRaidEncounter("Lord　Vyemm", 2, bosses)); // ideographic space
+        Assert.True(RaidUploadFilter.IsRaidEncounter("Lord Vyemm", 2, bosses));
+        Assert.False(RaidUploadFilter.IsRaidEncounter("LordVyemm", 2, bosses));
     }
 
     [Fact]

@@ -307,11 +307,30 @@ public sealed class HistoryService : IDisposable
     /// both the one-keystroke Remove-Item and creeping corruption. In a
     /// SUBFOLDER deliberately: the classic wipe command is the glob
     /// "history.db*", which must not take the backups with it.
-    /// Best-effort; a failed backup never blocks shutdown.</summary>
+    /// Best-effort; a failed backup never blocks shutdown.
+    ///
+    /// An EMPTY archive is never snapshotted, and so never rotates a
+    /// backup out. Rotating on every clean exit meant the insurance was
+    /// spent by the accident it was bought for: after a wipe (or an archive
+    /// recreated from nothing) the first exit put the empty archive in .bak
+    /// and the second pushed it into .bak2 — and "close it and open it
+    /// again" is exactly what someone does on finding their history gone.
+    /// Skipping costs nothing, because a snapshot of no fights restores to
+    /// what deleting history.db gives you anyway.
+    ///
+    /// The guard is deliberately no wider than that. Once the archive holds
+    /// a fight again the rotation resumes (there is new data to protect),
+    /// so a lost archive survives one more exit in .bak2 and is gone on the
+    /// next. Holding a backup back from a SMALLER archive would close that
+    /// gap, but trash retention and the archive's own purge shrink it
+    /// legitimately, and a backup that refuses to follow them protects
+    /// stale fights while the live ones go unprotected.</summary>
     private void BackupOnClose()
     {
         try
         {
+            if (!_store.HasEncounters())
+                return;
             var backupDir = Path.Combine(AppSettings.Directory, "backups");
             Directory.CreateDirectory(backupDir);
             var bak = Path.Combine(backupDir, "history.db.bak");
