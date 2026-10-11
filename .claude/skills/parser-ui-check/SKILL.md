@@ -56,7 +56,7 @@ For each page it writes two files under `artifacts/ui-check/` (git-ignored; `-Ou
   string shows as `Settings_Something`. Any element whose name is exactly a key from
   `src/EQ2Parser.App/Localization/strings.en.json` fails the page.
 - **The tab strip is there**, in the chosen language. An empty or half-built window fails.
-- **`-Expect "text"`** (repeatable): the text must appear in some element on the pages
+- **`-Expect "text"`** (several as `"one|two"`): each text must appear in some element on the pages
   visited. Use it to assert the thing you just added.
 - **The app survived** and wrote no crash report into the scratch data folder. A new crash
   report fails the run and its first lines are printed.
@@ -79,7 +79,7 @@ spacing between lines (which is what fights are made of) alone.
 
 `-Select "text"` selects list items by text they contain: the first match is selected and each
 further one is added to the selection, as Ctrl+click would. Use it for the fight list
-(`-Select "Boss A","Boss B"` gives the combined view, `-Select "All Bosses"` a rollup) and for
+(`-Select "Boss A|Boss B"` gives the combined view, `-Select "All Bosses"` a rollup) and for
 any other list. A text with no selectable item fails the page.
 
 Beyond tabs and list selection there is no click automation: no buttons, checkboxes, context

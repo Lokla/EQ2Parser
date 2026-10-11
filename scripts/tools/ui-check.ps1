@@ -11,7 +11,7 @@
 #   ./scripts/tools/ui-check.ps1 -DataDir <copy of a data folder>           # reproduce on real state
 #   ./scripts/tools/ui-check.ps1 -Page Settings -Expect "v0.5.8"            # text that must be on screen
 #   ./scripts/tools/ui-check.ps1 -Log <file> -Today                          # re-stamp the log to end a minute ago
-#   ./scripts/tools/ui-check.ps1 -Log <file> -Today -Select "Boss A","Boss B"   # select list items, then look
+#   ./scripts/tools/ui-check.ps1 -Log <file> -Today -Select "Boss A|Boss B"   # select list items, then look
 #
 # What it checks, per page:
 #   * no visible text is an unresolved localization key (Loc.Get falls back to
@@ -27,7 +27,8 @@
 # today's section starts expanded, so a log from last month shows a collapsed
 # header and no fights to select. -Select takes text that appears in a list
 # item (a fight's title, a row's name): the first match is selected, each
-# further one is ADDED to the selection, as Ctrl+click would.
+# further one is ADDED to the selection, as Ctrl+click would. Separate several
+# texts with a bar, for -Select and for -Expect alike.
 #
 # The app runs with EQ2PARSER_DATA_DIR pointed at a scratch folder, so the real
 # settings, history and token are never read or written. Its window is on
@@ -57,7 +58,10 @@ $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $navKeys = @('Main', 'Sources', 'Triggers', 'Timers', 'Overlays', 'Settings')
 # "-File ... -Page Main,Settings" arrives as one string, so split it here.
-$Select = @($Select | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+# Fight titles and labels can contain commas, so several -Select or -Expect
+# texts in one argument are separated by a bar: -Select "Boss A|Boss B".
+$Select = @($Select | ForEach-Object { $_ -split '\|' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+$Expect = @($Expect | ForEach-Object { $_ -split '\|' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 $Page = @($Page | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 if ($AllPages) { $Page = $navKeys }
 if (-not $Out) { $Out = Join-Path $repo 'artifacts\ui-check' }
@@ -252,8 +256,15 @@ function Select-Tab($root, [string]$label) {
         for ($i = 0; $i -lt 3 -and $node; $i++) {
             $pattern = $null
             if ($node.TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern, [ref]$pattern)) {
-                $pattern.Select()
-                return $true
+                # Select() returns before the app has acted on it, and a busy
+                # UI thread can drop it, so confirm and retry: reporting on
+                # the page that was showing before would be a false PASS.
+                for ($try = 0; $try -lt 5; $try++) {
+                    $pattern.Select()
+                    Start-Sleep -Milliseconds 400
+                    if ($pattern.Current.IsSelected) { return $true }
+                }
+                return $false
             }
             $node = $walker.GetParent($node)
         }
