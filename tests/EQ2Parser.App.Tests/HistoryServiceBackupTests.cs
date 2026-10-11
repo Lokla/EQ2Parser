@@ -40,10 +40,15 @@ public sealed class HistoryServiceBackupTests : IDisposable
     }
 
     /// <summary>One launch, the given fights, one clean exit.</summary>
-    private static void Session(params Encounter[] fights)
+    private static void Session(params Encounter[] fights) => Session(null, fights);
+
+    /// <summary>The same, with the service adjusted before it is used —
+    /// how a test makes this exit's snapshot fail.</summary>
+    private static void Session(Action<HistoryService>? configure, params Encounter[] fights)
     {
         using (var history = new HistoryService())
         {
+            configure?.Invoke(history);
             foreach (var fight in fights)
                 history.QueueSave(fight);
         }
@@ -164,5 +169,106 @@ public sealed class HistoryServiceBackupTests : IDisposable
         using var cmd = conn.CreateCommand();
         cmd.CommandText = "SELECT COUNT(*) FROM encounters WHERE title = 'Lord Oak 1';";
         Assert.Equal(0L, Convert.ToInt64(cmd.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture));
+    }
+
+    // ── A snapshot that does not finish must cost nothing ───────────────────
+
+    private string BackupDir => Path.Combine(_dir.Path, "backups");
+
+    private string[] BackupFiles() =>
+        [.. Directory.GetFiles(BackupDir).Select(Path.GetFileName).Order(StringComparer.Ordinal)!];
+
+    private static string Journal() =>
+        File.Exists(SessionJournal.FilePath) ? File.ReadAllText(SessionJournal.FilePath) : "";
+
+    [Fact]
+    public void A_Snapshot_That_Fails_Part_Way_Leaves_Both_Backups_As_They_Were()
+    {
+        Session(Fight(1));
+        Session(Fight(2));
+        Assert.Equal<(long?, long?)>((2, 1), (FightsIn(Bak), FightsIn(Bak2)));
+        CrashLog.ResetRateLimit();
+
+        // The disk fills while the snapshot is being written: part of a
+        // file exists, then the write throws. The old order had already
+        // moved .bak to .bak2 by then, so this exit left NO good .bak and
+        // the next one rotated the partial file over the last good copy.
+        Session(
+            history => history.SnapshotTo = static (_, path) =>
+            {
+                File.WriteAllText(path, "half a database");
+                throw new IOException("There is not enough space on the disk.");
+            },
+            Fight(3));
+
+        Assert.Equal<(long?, long?)>((2, 1), (FightsIn(Bak), FightsIn(Bak2)));
+        Assert.Equal(["history.db.bak", "history.db.bak2"], BackupFiles());
+        Assert.Contains("archive: exit backup FAILED (IOException)", Journal());
+        Assert.Single(Directory.GetFiles(CrashLog.Directory, "crash-*-archive-backup*.txt"));
+
+        // The exit after that is an ordinary one, and nothing was lost on
+        // the way: the newest archive in .bak, the last good one in .bak2.
+        Session();
+        Assert.Equal<(long?, long?)>((3, 2), (FightsIn(Bak), FightsIn(Bak2)));
+    }
+
+    [Fact]
+    public void A_Failing_Snapshot_On_Every_Exit_Never_Erodes_The_Backups()
+    {
+        Session(Fight(1));
+        Session(Fight(2));
+
+        for (var n = 3; n <= 6; n++)
+        {
+            Session(
+                history => history.SnapshotTo = static (_, path) =>
+                {
+                    File.WriteAllText(path, "half a database");
+                    throw new IOException("There is not enough space on the disk.");
+                },
+                Fight(n));
+        }
+
+        Assert.Equal<(long?, long?)>((2, 1), (FightsIn(Bak), FightsIn(Bak2)));
+    }
+
+    [Fact]
+    public void A_Temporary_Snapshot_Left_By_A_Dead_Exit_Is_Never_Promoted()
+    {
+        Session(Fight(1));
+        // An exit that was killed mid-snapshot: the temporary file is of
+        // unknown completeness. The next exit writes its own.
+        File.WriteAllText(Path.Combine(BackupDir, "history.db.bak.tmp"), "half a database");
+
+        Session(Fight(2));
+
+        Assert.Equal<(long?, long?)>((2, 1), (FightsIn(Bak), FightsIn(Bak2)));
+        Assert.Equal(["history.db.bak", "history.db.bak2"], BackupFiles());
+    }
+
+    [Fact]
+    public void A_Snapshot_That_Cannot_Even_Start_Leaves_Both_Backups_As_They_Were()
+    {
+        Session(Fight(1));
+        Session(Fight(2));
+        // Something is in the way of the temporary name and will not go.
+        var tmp = Path.Combine(BackupDir, "history.db.bak.tmp");
+        File.WriteAllText(tmp, "held");
+        using (new FileStream(tmp, FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            Session(Fight(3));
+        }
+
+        Assert.Equal<(long?, long?)>((2, 1), (FightsIn(Bak), FightsIn(Bak2)));
+    }
+
+    [Fact]
+    public void A_Clean_Exit_Leaves_Nothing_In_The_Backups_Folder_But_The_Two_Snapshots()
+    {
+        Session(Fight(1));
+        Assert.Equal(["history.db.bak"], BackupFiles());
+
+        Session(Fight(2));
+        Assert.Equal(["history.db.bak", "history.db.bak2"], BackupFiles());
     }
 }

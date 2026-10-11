@@ -158,7 +158,7 @@ public sealed class CrashEvidenceTests : IDisposable
     public void A_Session_That_Left_A_Fatal_Report_Is_Not_Described_As_Having_None()
     {
         var header = SessionJournal.PostmortemHeader(
-            startKnown: true, ending: ["crash-2026-03-14_222959-fatal.txt"], other: [], dumpsRequested: true, dumps: []);
+            startKnown: true, ending: ["crash-2026-03-14_222959-fatal.txt"], other: [], dumpsEnabled: true, dumps: []);
 
         Assert.Contains("left a", header);
         Assert.Contains("crash-2026-03-14_222959-fatal.txt", header);
@@ -171,51 +171,60 @@ public sealed class CrashEvidenceTests : IDisposable
     [Fact]
     public void A_Session_With_No_Report_Keeps_The_Native_Or_External_Reading()
     {
+        // On a machine that HAD local dumps enabled, a missing dump leans
+        // the same way — and is still not called proof.
         var header = SessionJournal.PostmortemHeader(
-            startKnown: true, ending: [], other: [], dumpsRequested: true, dumps: []);
+            startKnown: true, ending: [], other: [], dumpsEnabled: true, dumps: []);
 
         Assert.Contains("left no", header);
         Assert.Contains("antivirus", header);
-        Assert.Contains("had asked Windows for a dump", header);
+        Assert.Contains("no dump from it was found", header);
+        Assert.Contains("It is not proof", header);
     }
 
     [Fact]
     public void Survivable_Reports_Are_Listed_But_Not_Blamed()
     {
         var header = SessionJournal.PostmortemHeader(
-            startKnown: true, ending: [], other: ["crash-2026-03-14_213000-log-line.txt"], dumpsRequested: true, dumps: []);
+            startKnown: true, ending: [], other: ["crash-2026-03-14_213000-log-line.txt"], dumpsEnabled: true, dumps: []);
 
         Assert.Contains("left no", header);
         Assert.Contains("crash-2026-03-14_213000-log-line.txt", header);
         Assert.Contains("none is the reason it ended", header);
     }
 
-    [Fact]
-    public void No_Dump_Means_Nothing_For_A_Session_That_Never_Asked_For_One()
+    [Theory]
+    // The machine did not have local dumps enabled: none could exist.
+    [InlineData(false)]
+    // Nothing recorded: a journal from a build up to v0.5.7, which asked
+    // for dumps under a registry hive Windows does not read.
+    [InlineData(null)]
+    public void No_Dump_Means_Nothing_Unless_The_Machine_Had_Dumps_Enabled(bool? dumpsEnabled)
     {
-        // Sessions from builds that registered the wrong executable name.
         var header = SessionJournal.PostmortemHeader(
-            startKnown: true, ending: [], other: [], dumpsRequested: false, dumps: []);
+            startKnown: true, ending: [], other: [], dumpsEnabled, dumps: []);
 
         Assert.Contains("says nothing either way", header);
-        Assert.DoesNotContain("had asked Windows", header);
+        Assert.DoesNotContain("no dump from it was found", header);
+        Assert.DoesNotContain("leans", header);
     }
 
     [Fact]
     public void A_Dump_That_Exists_Is_Named()
     {
         var header = SessionJournal.PostmortemHeader(
-            startKnown: true, ending: [], other: [], dumpsRequested: true, dumps: ["EQ2Parser.App.exe.1234.dmp"]);
+            startKnown: true, ending: [], other: [], dumpsEnabled: true, dumps: [@"X:\dumps\EQ2Parser.App.exe.1234.dmp"]);
 
-        Assert.Contains("EQ2Parser.App.exe.1234.dmp", header);
-        Assert.DoesNotContain("has no new .dmp", header);
+        Assert.Contains(@"X:\dumps\EQ2Parser.App.exe.1234.dmp", header);
+        Assert.DoesNotContain("no dump from it was found", header);
+        Assert.DoesNotContain("says nothing either way", header);
     }
 
     [Fact]
     public void An_Unknown_Start_Claims_Nothing_About_Reports()
     {
         var header = SessionJournal.PostmortemHeader(
-            startKnown: false, ending: [], other: [], dumpsRequested: false, dumps: []);
+            startKnown: false, ending: [], other: [], dumpsEnabled: null, dumps: []);
 
         Assert.Contains("cannot tell", header);
         Assert.DoesNotContain("left no", header);

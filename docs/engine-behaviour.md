@@ -291,6 +291,53 @@ SQLite-backed subsystem with its own lock; fights it loads or mines (e.g.
 `AbilityMiner` on a background task) are fresh objects deserialized from disk,
 not the live ones the pump is mutating, so they carry no race with the writer.
 
+**Per-line fault isolation.** The pump treats each line as its own unit of
+failure (`LogSource.PumpLine`), in three sizes:
+
+- **An alert handler throws.** `LogLineProcessor.Process` runs the alert side
+  of a line — trigger evaluation and its `Fired` handlers, trigger-share
+  detection, the `RaidLine`, `StatusApplied` and spell-timer notifications — in
+  the same pass as the grammar, some of it before the grammar. Each of those
+  stages (`AlertStage`) has its own guard: a throw is counted and handed to
+  `LogLineProcessor.AlertFaulted`, and the rest of the line still runs, so a
+  bug in a handler can cost an alert but never the line's damage, heal or
+  death. The line counts as processed. `LogSource` writes a `log-alert` crash
+  report (at most five per source) and an `alert handler FAILED` journal line
+  (the first, then at most one per ten seconds), and counts it in
+  `LogSource.AlertFaults`; it is not a skipped line and never counts toward
+  stopping the source.
+- **The line itself throws** (the parse helpers, the idle rule's end-of-fight
+  announcement, the grammar, `SetEncounter` / `AddSwing`). The line is skipped
+  and the tail reads on: the engine is only mutated under the lock, the unwind
+  releases it, and every step either completes or leaves a state the next line
+  handles. Evidence: a `log-line` crash report quoting the line (five per
+  source), a `log line skipped` journal line, `LogSource.SkippedLines`.
+- **The source stops**, in two cases only: 200 lines in a row failed
+  (`LineFaultBreaker`, a structural fault rather than a bad line), or the tail
+  reader itself failed. Evidence: a `log-source-stopped` or `log-reader` report
+  and a `source STOPPED` journal line. Before `LogSource.Error` is set the
+  source ends its fight in progress through `ParserEngine.EndCombat`, so that
+  fight is announced once and saved like any other instead of staying "in
+  combat" for the rest of the session. It holds everything parsed before the
+  stop and nothing invented; what it lacks is the lines that failed or were
+  never read. `Error` is set last: whoever sees it finds the evidence written
+  and the fight ended.
+
+**Fight-consumer fan-out.** `ParserEngine.EncounterEnded` fires on the pump
+thread, under the lock, from inside the line that ended the fight. Every source
+subscribes the same handler, `SourceManager.OnEncounterEnded`, which runs the
+consumers in a fixed order — correlator (`EncounterCorrelator.Accept`), archive
+(`HistoryService.QueueSave`), upload (`UploadService.OnEncounterEnded`), raid
+roster — each inside its own guard (`SourceManager.Isolated`). A consumer that
+throws leaves a `fight-consumer` crash report and a `fight consumer FAILED`
+journal line; the consumers after it still run and the line is not skipped. As
+chained delegates the first to throw starved the rest and failed the line. The
+correlator's `Merged` event, which does archive work, goes through the same
+guard. Two of the consumers only enqueue: the archive write and the upload
+happen on their own background threads, outside the lock, and report their own
+failures (`archive-save` reports and `HistoryService.SaveFailures`; the upload
+status line).
+
 This is the same guarantee ACT achieved with its internal table locks — a
 single serialization point that keeps the combat data thread-safe across many
 consumers — implemented here as one App-level lock plus copy-on-read snapshots.

@@ -36,22 +36,47 @@ public sealed record CombatantSummary(
 /// </summary>
 public sealed class HistoryStore : IDisposable
 {
-    private const int SchemaVersion = 3;
+    private const int SchemaVersion = 4;
     private readonly SqliteConnection _conn;
 
+    /// <summary>Opens (creating if need be) and brings the file up to this
+    /// build's shape. Throws when it cannot — and then holds nothing: the
+    /// connection is closed before the exception leaves, so the caller is
+    /// free to move the file aside (see <see cref="IsDamagedFile"/> and
+    /// <see cref="Quarantine"/>). It used to stay open, unreachable, for
+    /// the life of the process, keeping the file locked against exactly
+    /// that.</summary>
     public HistoryStore(string path)
     {
-        _conn = new SqliteConnection($"Data Source={path}");
-        _conn.Open();
-        Execute("PRAGMA journal_mode=WAL");
-        Execute("PRAGMA foreign_keys=ON");
-        // Migrations run BEFORE the idempotent schema pass — a new index may
-        // reference a column the migration adds.
-        var storedVersion = StoredVersion();
-        Migrate();
-        CreateSchema();
-        StampVersion(storedVersion);
+        _conn = new SqliteConnection(ConnectionString(path));
+        try
+        {
+            _conn.Open();
+            Execute("PRAGMA journal_mode=WAL");
+            Execute("PRAGMA foreign_keys=ON");
+            // Migrations run BEFORE the idempotent schema pass — a new index may
+            // reference a column the migration adds.
+            var storedVersion = StoredVersion();
+            Migrate();
+            CreateSchema();
+            StampVersion(storedVersion);
+        }
+        catch
+        {
+            _conn.Dispose();
+            throw;
+        }
     }
+
+    /// <summary>Unpooled, for both the store and its snapshots. The
+    /// provider's pool keeps a "closed" connection's file handle open for
+    /// reuse, which buys nothing here (one connection for the life of the
+    /// process) and costs the two things this class promises: a store that
+    /// failed to open has let go of the file, and a finished snapshot can
+    /// be renamed into place. Built with the builder so a path containing
+    /// ";" or "=" is still one path.</summary>
+    private static string ConnectionString(string path) =>
+        new SqliteConnectionStringBuilder { DataSource = path, Pooling = false }.ToString();
 
     private int StoredVersion()
     {
@@ -78,34 +103,58 @@ public sealed class HistoryStore : IDisposable
     /// A step that is more than ADD COLUMN (a backfill, a rewrite of stored
     /// values) hangs off the column check that introduced it, inside the
     /// one transaction below, so "the column exists" always means "and its
-    /// backfill ran" — a crash between the two leaves neither.</summary>
+    /// backfill ran" — a crash between the two leaves neither.
+    ///
+    /// Each table is asked separately, and a table the file does not have
+    /// is skipped: CreateSchema builds a missing table in the current shape
+    /// outright (ALTER would fail on "no such table"), which is also all a
+    /// brand-new file needs.
+    ///
+    /// The steps were checked against CreateSchema column by column, from
+    /// the first build's CREATE TABLE statements forward:
+    ///  * encounters gained is_boss (v2) and zone_instance_expiry (v3);
+    ///  * swings gained observed_at_ms in CREATE TABLE only, with no ALTER
+    ///    for a file that already had the table — the step below is that
+    ///    omission made good (v4). The change predates the first release,
+    ///    so the files that lack the column are from pre-release builds;
+    ///  * combatants has not changed since it was created.
+    /// Indexes need no step: CreateSchema's IF NOT EXISTS adds a missing
+    /// one to an existing table.</summary>
     private void Migrate()
     {
-        var columns = ColumnNames("encounters");
-        // A brand-new file: no table to alter. CreateSchema builds the
-        // current shape outright (ALTER here would fail on "no such table").
-        if (columns.Count == 0)
-            return;
-
         List<string> steps = [];
-        // v2: is_boss, backfilled from the same named-mob rule the
-        // classifier uses. The backfill belongs to the column's CREATION
-        // only: on a file that already has is_boss the stored verdicts are
-        // the truth and must not be rewritten from the title.
-        if (!columns.Contains("is_boss"))
+
+        var encounters = ColumnNames("encounters");
+        if (encounters.Count > 0)
         {
-            steps.Add("""
-                ALTER TABLE encounters ADD COLUMN is_boss INTEGER NOT NULL DEFAULT 0;
-                UPDATE encounters SET is_boss = 1
-                 WHERE title <> 'Encounter'
-                   AND substr(title, 1, 2) <> 'a '
-                   AND substr(title, 1, 3) <> 'an ';
-                """);
+            // v2: is_boss, backfilled from the same named-mob rule the
+            // classifier uses. The backfill belongs to the column's CREATION
+            // only: on a file that already has is_boss the stored verdicts are
+            // the truth and must not be rewritten from the title.
+            if (!encounters.Contains("is_boss"))
+            {
+                steps.Add("""
+                    ALTER TABLE encounters ADD COLUMN is_boss INTEGER NOT NULL DEFAULT 0;
+                    UPDATE encounters SET is_boss = 1
+                     WHERE title <> 'Encounter'
+                       AND substr(title, 1, 2) <> 'a '
+                       AND substr(title, 1, 3) <> 'an ';
+                    """);
+            }
+            // v3: zone-instance identity (lockout expiry). Old rows stay NULL —
+            // grouping treats null as compatible with anything.
+            if (!encounters.Contains("zone_instance_expiry"))
+                steps.Add("ALTER TABLE encounters ADD COLUMN zone_instance_expiry INTEGER;");
         }
-        // v3: zone-instance identity (lockout expiry). Old rows stay NULL —
-        // grouping treats null as compatible with anything.
-        if (!columns.Contains("zone_instance_expiry"))
-            steps.Add("ALTER TABLE encounters ADD COLUMN zone_instance_expiry INTEGER;");
+
+        var swings = ColumnNames("swings");
+        // v4: the arrival stamp. The column was added to CREATE TABLE with
+        // no ALTER for the files that already had the table, and the insert
+        // and select lists name it — on such a file every save threw inside
+        // the archive writer and every restore threw at startup. Old rows
+        // stay NULL: "no arrival stamp", which is what they have.
+        if (swings.Count > 0 && !swings.Contains("observed_at_ms"))
+            steps.Add("ALTER TABLE swings ADD COLUMN observed_at_ms INTEGER;");
 
         // The usual open finds nothing to do and must not take the write
         // lock to learn that.
@@ -165,12 +214,134 @@ public sealed class HistoryStore : IDisposable
 
     public void Dispose() => _conn.Dispose();
 
+    // ---- a file that cannot be opened ----
+
+    /// <summary>SQLite's two verdicts on the FILE (primary result codes).
+    /// SQLITE_CORRUPT: "database disk image is malformed" and "malformed
+    /// database schema" both carry it, as do its extended forms (a corrupt
+    /// index, sequence or virtual table). SQLITE_NOTADB: "file is not a
+    /// database" — the first page does not start with SQLite's header, or
+    /// names a file format this library cannot read.</summary>
+    private const int SqliteCorrupt = 11;
+    private const int SqliteNotADatabase = 26;
+
+    /// <summary>Did opening or using the store fail because the file ITSELF
+    /// is bad — the one case where setting it aside and starting a fresh
+    /// archive is right?
+    ///
+    /// True for exactly two SQLite result codes, SQLITE_CORRUPT (11) and
+    /// SQLITE_NOTADB (26): SQLite read the bytes and they are not a usable
+    /// database. Waiting does not fix that and neither does a restart, so a
+    /// caller that leaves the file in place fails the same way on every
+    /// launch.
+    ///
+    /// False for everything else, on purpose, because every other failure
+    /// is about the moment, the machine or this build — and the file may be
+    /// a perfectly good archive:
+    ///  * SQLITE_BUSY (5), SQLITE_LOCKED (6), SQLITE_PROTOCOL (15): someone
+    ///    else holds it — a second copy of the app on the same data folder,
+    ///    a backup or sync tool, an antivirus scan;
+    ///  * SQLITE_CANTOPEN (14), SQLITE_PERM (3), SQLITE_AUTH (23),
+    ///    SQLITE_READONLY (8): the path, the folder or the permissions (an
+    ///    exclusive handle held by another process lands here too);
+    ///  * SQLITE_IOERR (10), SQLITE_FULL (13), SQLITE_NOMEM (7): the disk,
+    ///    the drive or the machine. A failing read CAN come from a dying
+    ///    disk under a damaged file, but it can as easily be a network
+    ///    share that dropped, and SQLite did not say the file is bad;
+    ///  * SQLITE_ERROR (1), SQLITE_CONSTRAINT (19), SQLITE_SCHEMA (17) and
+    ///    the rest: a statement was refused. That is this build's SQL
+    ///    meeting a shape it did not expect (or a bug in a migration step),
+    ///    and a build that is wrong about the file must not be the one
+    ///    that moves it;
+    ///  * anything that is not a SQLite error at all (an IO or access
+    ///    exception from the folder, a missing native library).
+    /// Moving a healthy archive aside would hide every fight the user has
+    /// behind a fresh empty one; leaving a damaged one in place costs a
+    /// session without an archive and a report that says why. When in
+    /// doubt the answer is false.</summary>
+    public static bool IsDamagedFile(Exception error) =>
+        error is SqliteException { SqliteErrorCode: SqliteCorrupt or SqliteNotADatabase };
+
+    /// <summary>Move a damaged database and its -wal / -shm siblings out of
+    /// the way, never deleting anything: <c>history.db</c> becomes
+    /// <c>history.db.corrupt-yyyyMMdd-HHmmss</c> (the settings files'
+    /// quarantine naming, see PersistedJsonFile) and the siblings follow as
+    /// <c>…-wal</c> and <c>…-shm</c> of THAT name — SQLite finds a write-ahead
+    /// log by appending "-wal" to the database's file name, so the renamed
+    /// set still opens as one database, uncheckpointed fights included, in
+    /// any SQLite tool or a later build. Returns the new path of the main
+    /// file.
+    ///
+    /// All or nothing. The main file goes first: if it will not move
+    /// (another process has it open) nothing has changed. If a sibling then
+    /// will not move, the main file is put back and the failure thrown —
+    /// a database parted from its WAL has lost what the WAL held, and a
+    /// fresh database created beside a stranger's WAL is worse. An earlier
+    /// quarantined archive is never overwritten: a second one inside the
+    /// same second gets "-2", "-3" before the sibling suffix.
+    ///
+    /// Unlike the settings files, nothing here is pruned. A quarantined
+    /// archive is the user's fights, not a few kilobytes of options, and
+    /// each one needs a newly damaged file to come into being.
+    ///
+    /// The caller must not hold the file open (a store whose constructor
+    /// threw has already let go of it).</summary>
+    public static string Quarantine(string path, DateTime now)
+    {
+        var stem = $"{path}.corrupt-{now.ToString("yyyyMMdd-HHmmss", System.Globalization.CultureInfo.InvariantCulture)}";
+        var target = stem;
+        for (var n = 2; TargetTaken(target) && n < 1000; n++)
+            target = $"{stem}-{n}";
+        if (TargetTaken(target))
+            throw new IOException($"No free quarantine name beside {Path.GetFileName(path)}.");
+
+        File.Move(path, target);
+        List<string> movedSiblings = [];
+        try
+        {
+            foreach (var suffix in SiblingSuffixes)
+            {
+                if (!File.Exists(path + suffix))
+                    continue;
+                File.Move(path + suffix, target + suffix);
+                movedSiblings.Add(suffix);
+            }
+        }
+        catch (Exception)
+        {
+            // Undo, newest first. Best-effort: if the way back is blocked
+            // too, the caller still learns the quarantine failed and must
+            // not create a fresh database here.
+            try
+            {
+                foreach (var suffix in movedSiblings.AsEnumerable().Reverse())
+                    File.Move(target + suffix, path + suffix);
+                File.Move(target, path);
+            }
+            catch (Exception)
+            {
+                // Reported by the throw below; nothing was deleted.
+            }
+            throw;
+        }
+        return target;
+
+        static bool TargetTaken(string candidate) =>
+            File.Exists(candidate) || SiblingSuffixes.Any(suffix => File.Exists(candidate + suffix));
+    }
+
+    /// <summary>The files SQLite keeps beside a WAL-mode database.</summary>
+    private static readonly string[] SiblingSuffixes = ["-wal", "-shm"];
+
     /// <summary>Online snapshot to <paramref name="destinationPath"/> via
     /// SQLite's backup API — consistent even mid-write/WAL, unlike a file
-    /// copy. Overwrites the destination.</summary>
+    /// copy. Overwrites the destination. The destination is closed, and
+    /// its file released, by the time this returns or throws (see
+    /// <see cref="ConnectionString"/>), so the caller can rename a finished
+    /// snapshot or delete a failed one.</summary>
     public void BackupTo(string destinationPath)
     {
-        using var destination = new SqliteConnection($"Data Source={destinationPath}");
+        using var destination = new SqliteConnection(ConnectionString(destinationPath));
         destination.Open();
         _conn.BackupDatabase(destination);
     }

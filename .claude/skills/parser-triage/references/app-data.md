@@ -47,8 +47,9 @@ it is renamed `<name>.corrupt-<yyyyMMdd-HHmmss>` and the app continues with defa
 | `lexicon_overrides.json` | `LexiconSyncService` | The user's enable/disable flips on Lexicon rows | yes | Every Lexicon row returns to the curator's default |
 | `raid_bosses.json` | `RaidBossSyncService` | Cached raid-boss list for the raid-only upload rule | no (a malformed file is ignored) | Safe: fetched again when the rule is in use |
 | `source_overrides.json` | read once by `SourceManager` through `SourceOverrides.MergeFile` | OPTIONAL hand-made corrections merged over the embedded `src/EQ2Parser.Core/Resources/source_overrides.json`; the app never writes it | no | Embedded rules only |
-| `history.db`, `history.db-wal`, `history.db-shm` | `HistoryService` over `HistoryStore` | SQLite archive of every finished fight with its full swing list | no | The whole archive is gone. Delete all three together, never one |
-| `backups\history.db.bak`, `backups\history.db.bak2` | `HistoryService.BackupOnClose` | Snapshot of the archive taken at each clean exit, unless the archive is empty; the previous one rotates to `.bak2` | no | Loses the safety net only |
+| `history.db`, `history.db-wal`, `history.db-shm` | `HistoryService` over `HistoryStore` | SQLite archive of every finished fight with its full swing list | its own: see "The archive" below | The whole archive is gone. Delete all three together, never one |
+| `history.db.corrupt-<yyyyMMdd-HHmmss>`, with `-wal` and `-shm` after that name | `HistoryStore.Quarantine`, called by `HistoryService` | A damaged archive that was renamed aside at startup, byte for byte. The fights saved before that launch are in it | n/a | Those fights are gone for good. Never suggest it; nothing prunes these files |
+| `backups\history.db.bak`, `backups\history.db.bak2` | `HistoryService.BackupOnClose` | Snapshot of the archive taken at each clean exit, unless the archive is empty; the previous one rotates to `.bak2`. The snapshot is written to `backups\history.db.bak.tmp` first and the rotation happens only once it is complete, so a failed snapshot leaves both backups as they were | no | Loses the safety net only |
 | `dkp-ledger.log` | `DkpLedger` | Append-only record of every confirmed DKP award and loot charge; the app never trims it | no | Do not delete: it is the only record for rebuilding a raid night's points |
 | `session.log` | `SessionJournal` | Breadcrumbs for the current session; rewritten at every start | no | Safe |
 | `crashes\crash-*.txt`, `crashes\postmortem-*.txt`, `crashes\dumps\` | `CrashLog`, `SessionJournal` | See `crash-logs.md` | no | Safe, but it is the evidence: copy before deleting |
@@ -58,7 +59,11 @@ Other names you may see:
 
 - `<name>.tmp` beside a JSON file is an atomic write in progress (`PersistedJsonFile` writes
   the temp file, then replaces the real one). A leftover is overwritten by the next save.
-- `<name>.corrupt-<timestamp>` is a quarantined file. The five newest per file are kept.
+- `<name>.corrupt-<timestamp>` is a quarantined file. For the JSON files the five newest per
+  file are kept. A quarantined archive (`history.db.corrupt-...`) is never pruned.
+- `backups\history.db.bak.tmp` is an exit snapshot in progress, or one left by an exit that
+  died while writing it. The next clean exit deletes it before writing its own; it is never
+  promoted to `.bak`.
 - Anything else, such as a `.bak` beside a JSON file, is a leftover from an early build. No
   current code reads or writes it.
 
@@ -74,13 +79,19 @@ that cache, not at a file.
   a tracked log's path (`<install>/logs/<server>/eq2log_<character>.txt`), or into
   `RaidCommandDirOverride` when set. The writes happen from the UI tick as soon as a source
   resolves an install folder, with no button press.
-- One registry key under the current user,
-  `Software\Microsoft\Windows\Windows Error Reporting\LocalDumps\<executable name>`, is set
-  at every launch by `SessionJournal.RegisterCrashDumps` and points Windows crash dumps at
-  `crashes\dumps`. The name is the running executable's file name: `EQ2Parser.App.exe` for
-  the shipped app. Builds up to v0.5.7 wrote the key as `EQ2Parser.exe`; the current build
-  deletes that one at launch. Whether Windows acts on the key is a separate question: see
-  "Crash dumps" in `crash-logs.md`.
+- The registry. The current build WRITES nothing there. At every launch
+  `SessionJournal.NoteCrashDumps` deletes two keys earlier builds created under the current
+  user, `Software\Microsoft\Windows\Windows Error Reporting\LocalDumps\EQ2Parser.exe` (builds
+  up to v0.5.7) and `...\LocalDumps\<executable name>` (`EQ2Parser.App.exe` for the shipped
+  app). Those keys asked Windows for crash dumps in `crashes\dumps`, and Windows ignores them:
+  it reads `LocalDumps` under `HKEY_LOCAL_MACHINE` only (verified, see "Crash dumps" in
+  `crash-logs.md`). The same method READS the machine-wide `LocalDumps` key to journal
+  whether dumps are enabled. Neither happens when the process image is a shared host
+(`dotnet.exe`, a test host): `SessionJournal.DumpImageName` decides.
+- Windows crash dumps of the app, when the machine has local dumps enabled, are in
+  `%LOCALAPPDATA%\CrashDumps` (Windows' own folder, shared by every program) as
+  `EQ2Parser.App.exe.<process id>.dmp`, unless the machine's settings name another folder. The
+  app never copies, opens or deletes them; the postmortem only names them.
 - The EQ2 log files are only read.
 
 ## Signatures worth knowing
@@ -112,6 +123,54 @@ that cache, not at a file.
   `Migrate`, not a reset. Still use a copy when you point any other build at someone's
   archive.
 
+## The archive: what happens when it cannot be used
+
+`HistoryService` never stops a launch over the archive. What it does instead is in
+`HistoryService.State` (`ArchiveState`), with the reason as English text in
+`HistoryService.DegradedReason`; `HistoryService.Problem` adds failed saves and restores to
+that. Builds up to v0.5.7 threw instead, which since the fatal-startup change meant exit code
+71 on every launch until the file was removed by hand.
+
+| What the session found | State | What it did | Left behind |
+| --- | --- | --- | --- |
+| The file opens | `Healthy` | Nothing | Nothing |
+| SQLite calls the FILE bad: result code 26 "file is not a database" or 11 "database disk image is malformed" / "malformed database schema" (`HistoryStore.IsDamagedFile`) | `Quarantined` | Renamed `history.db` to `history.db.corrupt-<yyyyMMdd-HHmmss>` (a `-wal` / `-shm` beside it follows, as `...corrupt-<timestamp>-wal`), then started a fresh, empty archive. Nothing is deleted | `crash-*-archive-quarantined.txt`; journal `archive QUARANTINED — history.db was damaged (SqliteException <code>); renamed to <file>, a fresh archive started, nothing deleted` |
+| Anything else: locked or held by another process, access denied, disk full, path missing, an SQL error from this build's own migration, a missing native library | `Unavailable` | Left the file exactly as it is. The session has NO archive: fights parse, show and upload; none is saved; the archive window is empty | `crash-*-archive-unavailable.txt`; journal `archive UNAVAILABLE — history.db could not be opened; the file was left untouched (<exception type and SQLite code>); this session saves no fights` |
+| The file is damaged but will not rename (something else has it open), or it was renamed and a fresh one could not be created | `Unavailable` | As above; in the second case `HistoryService.QuarantinedPath` names the renamed file | `crash-*-archive-unavailable.txt`; journal `archive UNAVAILABLE — history.db is damaged and could not be moved aside ...` or `... was damaged ... and renamed to <file>, but a fresh archive could not be created ...` |
+
+Reading it:
+
+- **"My history is empty after an update or a crash."** Look for `history.db.corrupt-*` in the
+  data folder and `archive QUARANTINED` in `session.log`. The old fights are in that file, not
+  lost. Ask for it privately (it names characters), work on a COPY, and try sqlite3's
+  `.recover` on it: the reason it was set aside is in the crash report. Tell the tester to
+  keep the file. To put a repaired one back: app closed, move the current `history.db*` files
+  aside, name the repaired file `history.db`.
+- **`archive UNAVAILABLE`** is about the moment, not the file. The usual cause is another
+  program holding it: a second EQ2Parser process (check Task Manager), a backup or sync client,
+  an antivirus scan. The next launch tries again by itself. Do NOT tell the tester to delete or
+  rename `history.db`: it is very likely a healthy archive. The `SqliteException` number in the
+  journal line says which: 5 busy, 14 cannot open, 8 read-only, 13 disk full, 10 IO error.
+- **The split is deliberately lopsided.** Renaming a healthy archive looks, to its owner,
+  exactly like losing it, so only SQLite's own verdict on the file moves it. A file SQLite can
+  open but this build's SQL trips over (result code 1) is left alone, and the session has no
+  archive: that is a bug in the build, and a later build can still open the file.
+- **Damage SQLite only finds later** (one unreadable page in the middle of a large file) does
+  not quarantine anything. The startup restore loads each fight in its own guard
+  (`HistoryService.RestoreInto`): a fight that cannot be read is skipped and the rest load.
+  Evidence: `crash-*-archive-restore.txt`, `HistoryService.RestoreFailures`, and a journal
+  line that begins `archive restore: <n> of <m> recent fights could not be loaded` (some
+  fights) or `archive restore FAILED` (the list itself could not be read).
+- **A save that fails** loses that fight from the archive, never the session, and is no longer
+  silent. It leaves `crash-*-archive-save.txt` (at most three per session, naming the fight's
+  title and zone) and a journal line
+  `archive save FAILED: <type and SQLite code> (<n> this session)` for the 1st, 10th, 100th
+  failure and so on, then the total at exit, `archive: <n> fight saves failed this session`.
+  `HistoryService.SaveFailures` counts every one. A full disk fails one save per fight, which
+  is why the journal thins out.
+- **A failed exit backup** leaves `history.db` and both existing backups untouched. Evidence:
+  `crash-*-archive-backup.txt` and the journal line `archive: exit backup FAILED (...)`.
+
 ## Resetting, for real
 
 Resetting a real data folder destroys things that cannot be rebuilt (own triggers, the fight
@@ -129,10 +188,19 @@ archive, the DKP ledger). Before any reset:
    good backup out. But once the new archive holds a single fight the rotation resumes: the
    next clean exit pushes the old archive to `.bak2` and the one after that drops it. Builds
    up to v0.5.7 rotate at every clean exit, empty or not, so there both backups hold the
-   new, empty archive two launches after a reset.
+   new, empty archive two launches after a reset. The same clock runs after a quarantine
+   (the fresh archive is a new archive), but there the old fights are also in the
+   `history.db.corrupt-` file, which nothing rotates or prunes.
+6. Never reset an archive the app has already set aside or declined to touch. A
+   `history.db.corrupt-` file is the tester's fights; an `archive UNAVAILABLE` session left a
+   probably healthy `history.db` in place. See "The archive" above before removing either.
 
-To put an archive back: with the app closed, remove the three `history.db*` files and copy
-`backups\history.db.bak` to `history.db`.
+To put an archive back: with the app closed, move the three `history.db*` files aside (the
+glob also matches a quarantined `history.db.corrupt-` file, so name the three, do not use
+`history.db*`) and copy `backups\history.db.bak` to `history.db`. A backup written by a
+build up to v0.5.7 can be a partial file: there the previous backup was rotated out BEFORE
+the new one was written, so a snapshot that failed part-way replaced the good one. If
+`.bak` will not open, try `.bak2`.
 
 ## Working on a copy
 
@@ -142,7 +210,9 @@ Reproducing against data should never touch the real folder.
 builds the app, launches it on a scratch folder, and handles every hazard listed below by
 itself. `-Log <file>` copies a log excerpt into a game-shaped scratch tree and parses it from
 the first line; `-DataDir <copy>` runs on a copy of a data folder after clearing its sources
-and turning uploads off. It also restores the crash-dump registry value afterwards.
+and turning uploads off. It also saves and puts back the per-user crash-dump registry value
+that builds before this one wrote at launch (the current build writes none and removes the
+key, which the script leaves removed).
 
 To drive the app by hand instead (clicking through something the script cannot reach), point
 it at a scratch directory:
@@ -174,8 +244,10 @@ What goes in the scratch directory decides how safe the run is:
   shows nothing.
 - `history.db` can be gigabytes. Copy it only when the bug involves the archive or the
   startup restore, and copy all three `history.db*` files with the app closed.
-- A scratch run still fetches the Lexicon pack from `LexiconBaseUrl` (read-only), and it
-  repoints the crash-dump registry value at the scratch folder until the next normal launch.
+- A scratch run still fetches the Lexicon pack from `LexiconBaseUrl` (read-only). Like any
+  launch it deletes the two per-user crash-dump registry keys earlier builds left, and writes
+  nothing to the registry. An earlier build run this way repoints that per-user value at the
+  scratch folder instead, until its next normal launch.
 
 A replayed excerpt is not "live": see the reproduction step in `SKILL.md` for what that
 does and does not exercise.

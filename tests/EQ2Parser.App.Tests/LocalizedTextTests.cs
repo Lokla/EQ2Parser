@@ -48,21 +48,20 @@ public sealed class LocalizedTextTests : IDisposable
 
     // ── Sources page: the status row ───────────────────────────────────────
 
-    /// <summary>A source whose raid-line stage throws on a marked line —
-    /// the way LogSourceFaultIsolationTests makes a line fail.</summary>
-    private LogSource Source(bool parseFromStart = true, bool autoDiscovered = false)
-    {
-        var source = new LogSource(_dir.FileIn("eq2log_Tester.txt"), parseFromStart, new object(), new EngineOptions(), TimeSpan.FromMilliseconds(5))
+    /// <summary>A source whose line handling throws on a marked line — the
+    /// way LogSourceFaultIsolationTests makes a line fail (the
+    /// <see cref="LogSource.BeforeProcess"/> hook; a throwing alert handler
+    /// no longer costs the line, so it cannot be used for this).</summary>
+    private LogSource Source(bool parseFromStart = true, bool autoDiscovered = false) =>
+        new(_dir.FileIn("eq2log_Tester.txt"), parseFromStart, new object(), new EngineOptions(), TimeSpan.FromMilliseconds(5))
         {
             AutoDiscovered = autoDiscovered,
+            BeforeProcess = static line =>
+            {
+                if (line.Message.Contains(PoisonMark, StringComparison.Ordinal))
+                    throw new InvalidOperationException("raid-line handler broke");
+            },
         };
-        source.Processor.RaidLine += static (message, _) =>
-        {
-            if (message.Contains(PoisonMark, StringComparison.Ordinal))
-                throw new InvalidOperationException("raid-line handler broke");
-        };
-        return source;
-    }
 
     private static TailedLine Hit(long secondsIn) =>
         new($"({Epoch + secondsIn})[s] YOUR Smite hits a gnoll for 500 divine damage.", T0);
@@ -94,9 +93,11 @@ public sealed class LocalizedTextTests : IDisposable
         Assert.Equal("1 lines · 1 matched · 1 encounters · IN COMBAT", SourcesViewModel.StatusFor(source));
         Assert.Equal(LegacyStatus(source), SourcesViewModel.StatusFor(source));
 
+        // The hook fails the line before the processor counts it as seen,
+        // so the line count stays at one.
         source.PumpLine(Poison);
         Assert.Equal(
-            "2 lines · 1 matched · 1 encounters · IN COMBAT · 1 skipped on error (last: InvalidOperationException) — see the crashes folder",
+            "1 lines · 1 matched · 1 encounters · IN COMBAT · 1 skipped on error (last: InvalidOperationException) — see the crashes folder",
             SourcesViewModel.StatusFor(source));
         Assert.Equal(LegacyStatus(source), SourcesViewModel.StatusFor(source));
     }
@@ -132,7 +133,7 @@ public sealed class LocalizedTextTests : IDisposable
                 Assert.NotEqual(LegacyStatus(source), status);
         });
         LocTestHost.In("de", () => Assert.Equal(
-            "Zeilen: 2 · erkannt: 1 · Kämpfe: 1 · IM KAMPF · nach Fehler übersprungen: 1 (zuletzt: InvalidOperationException) — siehe den Ordner „crashes“",
+            "Zeilen: 1 · erkannt: 1 · Kämpfe: 1 · IM KAMPF · nach Fehler übersprungen: 1 (zuletzt: InvalidOperationException) — siehe den Ordner „crashes“",
             SourcesViewModel.StatusFor(source)));
     }
 

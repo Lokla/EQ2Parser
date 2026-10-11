@@ -4,13 +4,15 @@ using Velopack.Locators;
 
 namespace EQ2Parser.App.Tests;
 
-/// <summary>SourceManager owns an UpdateService, and Velopack's
-/// UpdateManager refuses to construct until the process has a locator —
-/// in the app, Program.Main's VelopackApp.Build().Run() provides it before
-/// any WPF code. A test that builds a real SourceManager calls
-/// <see cref="Ensure"/> first: Velopack's own test locator, an empty
-/// packages folder, no hooks and no auto-apply, so nothing is ever looked
-/// up, downloaded or applied.</summary>
+/// <summary>Velopack's UpdateManager refuses to construct until the
+/// process has a locator — in the app, Program.Main's
+/// VelopackApp.Build().Run() provides it before any WPF code.
+/// UpdateService builds its manager on first use now, so constructing a
+/// SourceManager (which owns one) no longer needs this; a test that goes
+/// on to READ the manager (the version label on the Settings page) still
+/// does, and calls <see cref="Ensure"/> first: Velopack's own test
+/// locator, an empty packages folder, no hooks and no auto-apply, so
+/// nothing is ever looked up, downloaded or applied.</summary>
 internal static class VelopackTestHost
 {
     private static readonly object Gate = new();

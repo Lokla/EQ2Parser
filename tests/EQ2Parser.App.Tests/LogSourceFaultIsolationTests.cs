@@ -20,14 +20,19 @@ public sealed class LogSourceFaultIsolationTests : IDisposable
 
     /// <summary>What marks a line as the one whose handling fails. No log
     /// line is known to throw by itself any more (the last one, an epoch no
-    /// timestamp can hold, is refused by LogLine.TryParse now), so the
-    /// fault is injected where real ones come from: a subscriber on the line
-    /// path. Every source built by <see cref="Source"/> carries a raid-line
-    /// handler that throws on a line with this text.</summary>
+    /// timestamp can hold, is refused by LogLine.TryParse now), and the
+    /// subscriber stages that used to carry the injected fault (a throwing
+    /// raid-line handler) are contained by the processor now — such a
+    /// throw no longer fails the LINE, which is the point of the tests
+    /// further down. So a whole-line failure is injected through the one
+    /// seam made for it: every source built by <see cref="Source"/> has a
+    /// <see cref="LogSource.BeforeProcess"/> hook that throws on a line
+    /// with this text. It runs inside the per-line guard, under the sync
+    /// lock, where the processor is about to run — the same place a throw
+    /// from the combat path surfaces — and touches no engine state.</summary>
     private const string PoisonMark = "private words";
 
-    /// <summary>A live, raid-relevant chat line carrying the mark, so it
-    /// reaches the throwing handler.</summary>
+    /// <summary>A chat line carrying the mark.</summary>
     private static string PoisonAt(long epoch) =>
         $"({epoch})[s] Somebody tells you, \"{PoisonMark}\" about the raid";
 
@@ -49,14 +54,27 @@ public sealed class LogSourceFaultIsolationTests : IDisposable
     private static string Hit(long secondsIn, int damage = 500, long? from = null) =>
         $"({(from ?? Epoch) + secondsIn})[s] YOUR Smite hits a gnoll for {damage} divine damage.";
 
-    private LogSource Source(string name = "eq2log_Tester.txt", bool parseFromStart = true)
-    {
-        var source = new LogSource(_dir.FileIn(name), parseFromStart, new object(), new EngineOptions(), TimeSpan.FromMilliseconds(5));
-        source.Processor.RaidLine += static (message, _) =>
+    private LogSource Source(string name = "eq2log_Tester.txt", bool parseFromStart = true) =>
+        new(_dir.FileIn(name), parseFromStart, new object(), new EngineOptions(), TimeSpan.FromMilliseconds(5))
         {
-            if (message.Contains(PoisonMark, StringComparison.Ordinal))
-                throw new InvalidOperationException("raid-line handler broke");
+            BeforeProcess = static line =>
+            {
+                if (line.Message.Contains(PoisonMark, StringComparison.Ordinal))
+                    throw new InvalidOperationException("line handling broke");
+            },
         };
+
+    /// <summary>A combat line the raid-attendance prefilter also wants
+    /// (" the raid"), so it reaches a raid-line handler AND the grammar.</summary>
+    private static string RaidHit(long secondsIn, int damage = 500) =>
+        $"({Epoch + secondsIn})[s] YOUR Smite hits Bane of the raid for {damage} divine damage.";
+
+    /// <summary>A source whose raid-line handler throws on every line it is
+    /// shown — a bug in an alert handler, which must cost no combat data.</summary>
+    private LogSource SourceWithBrokenAlertHandler()
+    {
+        var source = Source();
+        source.Processor.RaidLine += static (_, _) => throw new InvalidOperationException("raid-line handler broke");
         return source;
     }
 
@@ -212,8 +230,7 @@ public sealed class LogSourceFaultIsolationTests : IDisposable
     public async Task The_Tail_Loop_Survives_A_Poison_Line_In_A_Real_File()
     {
         var path = _dir.FileIn("eq2log_Tester.txt");
-        // Stamped "now": the raid-line stage only runs for LIVE lines, and a
-        // line read from a file is live when its own time is moments old.
+        // Stamped "now", as the lines of a live tail are.
         var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         await File.WriteAllLinesAsync(path, [Hit(0, from: now), PoisonAt(now), Hit(1, from: now), Hit(2, from: now)]);
         using var source = Source();
@@ -282,6 +299,228 @@ public sealed class LogSourceFaultIsolationTests : IDisposable
         var status = SourcesViewModel.StatusFor(source);
 
         Assert.StartsWith("error: stopped after 200 lines in a row", status);
+    }
+
+    // ── A stopped source ends its fight ─────────────────────────────────────
+
+    [Fact]
+    public void A_Source_Stopped_By_The_Breaker_Ends_Its_Fight_And_Announces_It_Once()
+    {
+        using var source = Source();
+        var announced = 0;
+        Exception? errorAtAnnouncement = new InvalidOperationException("never announced");
+        var stopReportsAtAnnouncement = -1;
+        source.Engine.EncounterEnded += _ =>
+        {
+            announced++;
+            errorAtAnnouncement = source.Error;
+            stopReportsAtAnnouncement = Reports("log-source-stopped").Length;
+        };
+        Assert.True(source.PumpLine(Tailed(Hit(0))));
+        Assert.True(source.PumpLine(Tailed(Hit(1))));
+        Assert.True(source.Engine.InCombat);
+
+        for (var i = 0; i < LineFaultBreaker.DefaultTripAfter; i++)
+            source.PumpLine(Tailed(Poison));
+
+        // Before: the source stopped with its engine still in combat — the
+        // fight was never ended, so never saved and never uploaded.
+        Assert.NotNull(source.Error);
+        Assert.False(source.Engine.InCombat);
+        Assert.Null(source.Engine.ActiveEncounter);
+        var fight = Assert.Single(source.Engine.History);
+        Assert.False(fight.Active);
+        // What parsed before the fault is all there.
+        Assert.Equal(1000, fight.Combatants["TESTER"].Damage);
+        Assert.Equal(1, announced);
+        // The order: the stop report first, then the fight, and Error only
+        // after both — whoever sees Error finds the rest done.
+        Assert.Equal(1, stopReportsAtAnnouncement);
+        Assert.Null(errorAtAnnouncement);
+        Assert.Contains("lines in a row failed", Journal());
+        Assert.Contains("; its fight in progress was ended", Journal());
+        Assert.DoesNotContain("IN COMBAT", SourcesViewModel.StatusFor(source));
+    }
+
+    [Fact]
+    public void A_Source_Stopped_Out_Of_Combat_Announces_Nothing()
+    {
+        using var source = Source();
+        var announced = 0;
+        source.Engine.EncounterEnded += _ => announced++;
+
+        for (var i = 0; i < LineFaultBreaker.DefaultTripAfter; i++)
+            source.PumpLine(Tailed(Poison));
+
+        Assert.NotNull(source.Error);
+        Assert.Equal(0, announced);
+        Assert.Empty(source.Engine.History);
+        Assert.DoesNotContain("fight in progress", Journal());
+    }
+
+    [Fact]
+    public void A_Consumer_That_Throws_On_The_Final_Announcement_Does_Not_Block_The_Stop()
+    {
+        using var source = Source();
+        source.Engine.EncounterEnded += static _ => throw new InvalidOperationException("subscriber broke");
+        Assert.True(source.PumpLine(Tailed(Hit(0))));
+
+        for (var i = 0; i < LineFaultBreaker.DefaultTripAfter; i++)
+            source.PumpLine(Tailed(Poison));
+
+        // The fight is ended and in history even so, and the source still
+        // says it stopped.
+        Assert.NotNull(source.Error);
+        Assert.Contains("lines in a row", source.Error.Message);
+        Assert.False(source.Engine.InCombat);
+        Assert.False(Assert.Single(source.Engine.History).Active);
+        var report = File.ReadAllText(Assert.Single(Reports("fight-consumer")));
+        Assert.Contains("because this source stopped", report);
+    }
+
+    [Fact]
+    public async Task A_Reader_Failure_Mid_Fight_Ends_The_Fight_Before_The_Source_Says_It_Stopped()
+    {
+        var path = _dir.FileIn("eq2log_Tester.txt");
+        await File.WriteAllLinesAsync(path, [Hit(0), Hit(1)]);
+        using var source = Source();
+        var announced = 0;
+        Exception? errorAtAnnouncement = new InvalidOperationException("never announced");
+        source.Engine.EncounterEnded += _ =>
+        {
+            announced++;
+            errorAtAnnouncement = source.Error;
+        };
+
+        source.Start();
+        await WaitFor(() => source.Processor.LinesMatched >= 2);
+        Assert.Null(source.Error);
+
+        // The fight is under way. Now the log grows, and the new bytes
+        // cannot be read: a byte-range lock held by another handle over
+        // exactly the region it appends to.
+        using var locker = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete);
+        var end = locker.Length;
+        locker.Lock(end, 1 << 16);
+        locker.Position = end;
+        await locker.WriteAsync(System.Text.Encoding.UTF8.GetBytes(Hit(2) + Environment.NewLine));
+        await locker.FlushAsync();
+
+        // Error is set last, so waiting on it is waiting on everything.
+        await WaitFor(() => source.Error is not null);
+
+        Assert.IsAssignableFrom<IOException>(source.Error);
+        Assert.Equal(1, announced);
+        Assert.Null(errorAtAnnouncement);
+        Assert.False(source.Engine.InCombat);
+        var fight = Assert.Single(source.Engine.History);
+        Assert.False(fight.Active);
+        Assert.Equal(1000, fight.Combatants["TESTER"].Damage);
+        Assert.Single(Reports("log-reader"));
+        Assert.Contains("the log reader failed (IOException); its fight in progress was ended", Journal());
+        locker.Unlock(end, 1 << 16);
+    }
+
+    // ── Alert-handler faults: contained, reported, never a failed line ──────
+
+    [Fact]
+    public void A_Throwing_Alert_Handler_Costs_No_Line_And_Leaves_Its_Own_Evidence()
+    {
+        using var source = SourceWithBrokenAlertHandler();
+
+        Assert.True(source.PumpLine(Tailed(Hit(0))));
+        // Before: the handler's throw skipped this line — 500 damage lost
+        // to a bug in the attendance code.
+        Assert.True(source.PumpLine(Tailed(RaidHit(1))));
+
+        Assert.Null(source.Error);
+        Assert.Equal(0, source.SkippedLines);
+        Assert.Null(source.LastLineError);
+        Assert.Equal(2, source.Processor.LinesMatched);
+        Assert.Equal(1000, source.Engine.ActiveEncounter!.Combatants["TESTER"].Damage);
+        Assert.Equal(1, source.AlertFaults);
+        Assert.IsType<InvalidOperationException>(source.LastAlertError);
+        // Its own report kind, saying what did not go wrong…
+        Assert.Empty(Reports("log-line"));
+        var report = File.ReadAllText(Assert.Single(Reports(LogSource.AlertKind)));
+        Assert.Contains("Alert stage: raid line", report);
+        Assert.Contains("no combat data is missing", report);
+        Assert.Contains("InvalidOperationException", report);
+        Assert.Contains("   at ", report);
+        Assert.Contains("Bane of the raid", report);
+        // …and a journal line with the stage and the type, never the text.
+        var journal = Journal();
+        Assert.Contains("alert handler FAILED: eq2log_Tester.txt — raid line (InvalidOperationException, 1 this session); the line was still parsed", journal);
+        Assert.DoesNotContain("Bane", journal);
+        Assert.DoesNotContain("log line skipped", journal);
+        // The Sources row does not call a parsed line skipped.
+        Assert.DoesNotContain("skipped", SourcesViewModel.StatusFor(source));
+    }
+
+    [Fact]
+    public void Alert_Faults_Never_Trip_The_Breaker_However_Many_In_A_Row()
+    {
+        using var source = SourceWithBrokenAlertHandler();
+
+        for (var i = 0; i < 2 * LineFaultBreaker.DefaultTripAfter; i++)
+            Assert.True(source.PumpLine(Tailed(RaidHit(0))), $"stopped at line {i}");
+
+        // Every line was parsed, so nothing here is a failed line.
+        Assert.Null(source.Error);
+        Assert.Equal(0, source.SkippedLines);
+        Assert.Equal(2 * LineFaultBreaker.DefaultTripAfter, source.AlertFaults);
+        Assert.Equal(2 * LineFaultBreaker.DefaultTripAfter, source.Processor.LinesMatched);
+        Assert.Equal(500L * 2 * LineFaultBreaker.DefaultTripAfter, source.Engine.ActiveEncounter!.Combatants["TESTER"].Damage);
+        Assert.Empty(Reports("log-source-stopped"));
+        // And the evidence stayed small: 400 faults, not 400 lines.
+        Assert.InRange(Reports(LogSource.AlertKind).Length, 1, 5);
+        Assert.True(Journal().Split('\n').Length < 10);
+    }
+
+    [Fact]
+    public void Alert_Reports_Are_Capped_Per_Source_Separately_From_Line_Reports()
+    {
+        using var source = SourceWithBrokenAlertHandler();
+
+        for (var i = 0; i < 20; i++)
+        {
+            CrashLog.ResetRateLimit(); // as if each fault were seconds apart
+            source.PumpLine(Tailed(RaidHit(i)));
+            CrashLog.ResetRateLimit();
+            source.PumpLine(Tailed(Poison));
+        }
+
+        Assert.Equal(20, source.AlertFaults);
+        Assert.Equal(20, source.SkippedLines);
+        Assert.Equal(5, Reports(LogSource.AlertKind).Length);
+        Assert.Equal(5, Reports("log-line").Length);
+    }
+
+    [Fact]
+    public async Task The_Tail_Loop_Reports_Alert_Faults_From_A_Real_File_And_Keeps_Every_Line()
+    {
+        var path = _dir.FileIn("eq2log_Tester.txt");
+        // Stamped "now": the alert stages only run for LIVE lines, and a
+        // line read from a file is live when its own time is moments old.
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        string LiveRaidHit(int secondsIn) =>
+            $"({now + secondsIn})[s] YOUR Smite hits Bane of the raid for 500 divine damage.";
+        await File.WriteAllLinesAsync(path, [Hit(0, from: now), Hit(1, from: now), LiveRaidHit(2), LiveRaidHit(3)]);
+        using var source = SourceWithBrokenAlertHandler();
+
+        source.Start();
+        // A fault's count is published after its evidence, which is
+        // written after its line has been processed in full — and the
+        // second fault belongs to the LAST line. So once it shows, every
+        // line is done and the pump is idle.
+        await WaitFor(() => source.AlertFaults >= 2);
+
+        Assert.Null(source.Error);
+        Assert.Equal(0, source.SkippedLines);
+        Assert.Equal(2, source.AlertFaults);
+        Assert.Equal(2000, source.Engine.ActiveEncounter!.Combatants["TESTER"].Damage);
+        Assert.NotEmpty(Reports(LogSource.AlertKind));
+        Assert.Contains("alert handler FAILED: eq2log_Tester.txt — raid line", Journal());
     }
 
     private static async Task WaitFor(Func<bool> condition)

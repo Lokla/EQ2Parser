@@ -583,4 +583,255 @@ public sealed class HistoryStoreTests : IDisposable
             Assert.Equal(Math.Max(stamp, current), UserVersion(path));
         }
     }
+
+    // ---- columns outside the encounters table ----
+
+    /// <summary>The swings table as the first build created it: no
+    /// observed_at_ms. The column joined CREATE TABLE soon after with no
+    /// ALTER beside it, so a file created in between never gained it.</summary>
+    private const string FirstSwingsTable = """
+        CREATE TABLE swings (
+            encounter_id  INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE,
+            category      INTEGER NOT NULL,
+            critical      INTEGER NOT NULL,
+            special       TEXT NOT NULL,
+            attacker      TEXT NOT NULL,
+            ability       TEXT NOT NULL,
+            damage_number INTEGER NOT NULL,
+            damage_text   TEXT NOT NULL,
+            time_ts       INTEGER NOT NULL,
+            time_sorter   INTEGER NOT NULL,
+            victim        TEXT NOT NULL,
+            damage_type   TEXT NOT NULL,
+            extra         TEXT
+        );
+        """;
+
+    [Fact]
+    public void Swings_Table_From_Before_The_Arrival_Stamp_Gains_The_Column()
+    {
+        // Whatever the encounters table looks like and whatever the stamp
+        // says: the swings step is keyed on the swings table alone.
+        var current = CurrentSchemaVersion();
+        foreach (var stamp in new[] { 1L, current })
+        {
+            var path = Path.Combine(_dir, $"old-swings-{stamp}.db");
+            long id;
+            using (var store = new HistoryStore(path))
+                id = store.SaveEncounter(BuildEncounter());
+            // Put the file back into the old shape with its rows in place.
+            Sql(path, $"""
+                ALTER TABLE swings DROP COLUMN observed_at_ms;
+                PRAGMA user_version = {stamp};
+                """);
+            Assert.DoesNotContain("observed_at_ms", Columns(path, "swings"));
+
+            using (var store = new HistoryStore(path))
+            {
+                // Rows from before the column read back with no arrival
+                // stamp — the same "old rows stay NULL" contract as
+                // zone_instance_expiry.
+                var old = store.LoadSwings(id);
+                Assert.Equal(4, old.Count);
+                Assert.All(old, s => Assert.Null(s.ObservedAt));
+                // And the insert that names the column works again: without
+                // the step it threw inside the archive writer, and every
+                // fight after it was lost.
+                var saved = store.SaveEncounter(BuildInstancedEncounter());
+                Assert.Equal(2, store.LoadSwings(saved).Count);
+            }
+            Assert.Contains("observed_at_ms", Columns(path, "swings"));
+            Assert.Equal(current, UserVersion(path));
+        }
+    }
+
+    [Fact]
+    public void First_Release_Shape_In_Every_Table_Migrates_In_One_Open()
+    {
+        // The oldest file there can be: every table exactly as the first
+        // build created it, so every step this build has runs together.
+        var path = Path.Combine(_dir, "first.db");
+        Sql(path, $"""
+            CREATE TABLE encounters (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_id      TEXT NOT NULL,
+                owner          TEXT NOT NULL,
+                zone           TEXT NOT NULL,
+                title          TEXT NOT NULL,
+                start_ts       INTEGER NOT NULL,
+                end_ts         INTEGER NOT NULL,
+                duration_s     REAL NOT NULL,
+                success        INTEGER NOT NULL,
+                damage         INTEGER NOT NULL,
+                correlation_id TEXT,
+                saved_at       INTEGER NOT NULL
+            );
+            CREATE TABLE combatants (
+                encounter_id INTEGER NOT NULL REFERENCES encounters(id) ON DELETE CASCADE,
+                name         TEXT NOT NULL,
+                damage       INTEGER NOT NULL,
+                healed       INTEGER NOT NULL,
+                damage_taken INTEGER NOT NULL,
+                heals_taken  INTEGER NOT NULL,
+                deaths       INTEGER NOT NULL,
+                is_ally      INTEGER NOT NULL
+            );
+            {FirstSwingsTable}
+            INSERT INTO encounters (source_id, owner, zone, title, start_ts, end_ts, duration_s, success, damage, saved_at)
+            VALUES ('log-a', 'Alder', 'Deathtoll', 'Lord Oak', 1000, 1060, 60, 1, 5000, 1000);
+            INSERT INTO swings (encounter_id, category, critical, special, attacker, ability, damage_number, damage_text, time_ts, time_sorter, victim, damage_type)
+            VALUES (1, 1, 0, 'None', 'Alder', 'Strike', 5000, '', 1000, 1, 'Lord Oak', 'crushing');
+            PRAGMA user_version = 1;
+            """);
+
+        using (var store = new HistoryStore(path))
+        {
+            var old = Assert.Single(store.QueryEncounters());
+            Assert.True(old.IsBoss);
+            Assert.Null(Assert.Single(store.LoadSwings(old.Id)).ObservedAt);
+            Assert.NotNull(store.RestoreEncounter(old));
+            store.SaveEncounter(BuildInstancedEncounter());
+            Assert.Equal(2, store.QueryEncounters().Count);
+        }
+
+        // Nothing CreateSchema declares is missing from the migrated file:
+        // column for column, the same shape as a file created today.
+        var fresh = Path.Combine(_dir, "first-fresh.db");
+        using (new HistoryStore(fresh)) { }
+        foreach (var table in new[] { "encounters", "combatants", "swings" })
+            Assert.Equal(Columns(fresh, table), Columns(path, table));
+    }
+
+    // ---- a file that cannot be opened ----
+
+    [Fact]
+    public void A_File_That_Is_Not_A_Database_Fails_To_Open_Without_Staying_Locked()
+    {
+        var path = Path.Combine(_dir, "garbage.db");
+        File.WriteAllText(path, new string('x', 8192));
+
+        var error = Assert.Throws<Microsoft.Data.Sqlite.SqliteException>(() => new HistoryStore(path));
+
+        Assert.True(HistoryStore.IsDamagedFile(error));
+        // The constructor used to leave its connection open when it threw,
+        // and the file stayed locked for the life of the process — nothing
+        // could move it out of the way. No pool flush, no GC: it must be
+        // free the moment the constructor has thrown.
+        var aside = path + ".aside";
+        File.Move(path, aside);
+        Assert.True(File.Exists(aside));
+    }
+
+    [Fact]
+    public void A_Store_That_Is_Disposed_Lets_Go_Of_Its_File()
+    {
+        var path = Path.Combine(_dir, "released.db");
+        using (var store = new HistoryStore(path))
+            store.SaveEncounter(BuildEncounter());
+
+        File.Move(path, path + ".aside");
+    }
+
+    [Fact]
+    public void Only_What_Sqlite_Calls_A_Bad_File_Counts_As_Damaged()
+    {
+        // 11 SQLITE_CORRUPT and 26 SQLITE_NOTADB are verdicts on the FILE.
+        Assert.True(HistoryStore.IsDamagedFile(new Microsoft.Data.Sqlite.SqliteException("corrupt", 11)));
+        Assert.True(HistoryStore.IsDamagedFile(new Microsoft.Data.Sqlite.SqliteException("corrupt index", 11, 779)));
+        Assert.True(HistoryStore.IsDamagedFile(new Microsoft.Data.Sqlite.SqliteException("not a database", 26)));
+        // Everything else is about the moment, the machine or this build:
+        // an SQL error, busy, locked, read-only, IO error, disk full,
+        // cannot open, lock protocol, permission.
+        foreach (var code in new[] { 1, 3, 5, 6, 7, 8, 10, 13, 14, 15, 17, 19, 23 })
+            Assert.False(HistoryStore.IsDamagedFile(new Microsoft.Data.Sqlite.SqliteException("not the file", code)), $"SQLite result code {code}");
+        Assert.False(HistoryStore.IsDamagedFile(new IOException("sharing violation")));
+        Assert.False(HistoryStore.IsDamagedFile(new UnauthorizedAccessException("denied")));
+    }
+
+    [Fact]
+    public void A_Truncated_Database_Is_Reported_As_Damaged()
+    {
+        // A real archive cut short (a copy that did not finish, a disk that
+        // filled mid-write) — the header is intact, the pages are not.
+        var path = Path.Combine(_dir, "truncated.db");
+        using (var store = new HistoryStore(path))
+        {
+            for (var i = 0; i < 20; i++)
+                store.SaveEncounter(BuildEncounter());
+        }
+        foreach (var sibling in new[] { path + "-wal", path + "-shm" })
+            File.Delete(sibling);
+        var whole = File.ReadAllBytes(path);
+        Assert.True(whole.Length > 8192, "the archive is too small to truncate meaningfully");
+        File.WriteAllBytes(path, whole[..(whole.Length / 2)]);
+
+        var error = Assert.ThrowsAny<Exception>(() =>
+        {
+            using var store = new HistoryStore(path);
+            // Corruption past the first page only shows when it is read.
+            foreach (var summary in store.QueryEncounters())
+                store.LoadSwings(summary.Id);
+        });
+
+        Assert.True(HistoryStore.IsDamagedFile(error), $"{error.GetType().Name}: {error.Message}");
+    }
+
+    [Fact]
+    public void Quarantine_Moves_The_Database_And_Its_Siblings_Aside_Together()
+    {
+        var path = Path.Combine(_dir, "history.db");
+        File.WriteAllText(path, "main");
+        File.WriteAllText(path + "-wal", "wal");
+        File.WriteAllText(path + "-shm", "shm");
+
+        var moved = HistoryStore.Quarantine(path, new DateTime(2026, 3, 14, 21, 5, 1));
+
+        Assert.Equal(path + ".corrupt-20260314-210501", moved);
+        // The siblings keep SQLite's own naming relative to the renamed
+        // file, so opening it with any SQLite tool still finds its WAL.
+        Assert.Equal("main", File.ReadAllText(moved));
+        Assert.Equal("wal", File.ReadAllText(moved + "-wal"));
+        Assert.Equal("shm", File.ReadAllText(moved + "-shm"));
+        Assert.False(File.Exists(path));
+        Assert.False(File.Exists(path + "-wal"));
+        Assert.False(File.Exists(path + "-shm"));
+    }
+
+    [Fact]
+    public void Quarantine_Never_Overwrites_An_Earlier_Quarantined_Archive()
+    {
+        var path = Path.Combine(_dir, "history.db");
+        var when = new DateTime(2026, 3, 14, 21, 5, 1);
+        File.WriteAllText(path, "first");
+        var first = HistoryStore.Quarantine(path, when);
+        File.WriteAllText(path, "second");
+        File.WriteAllText(path + "-wal", "second wal");
+
+        var second = HistoryStore.Quarantine(path, when);
+
+        Assert.NotEqual(first, second);
+        Assert.Equal("first", File.ReadAllText(first));
+        Assert.Equal("second", File.ReadAllText(second));
+        Assert.Equal("second wal", File.ReadAllText(second + "-wal"));
+    }
+
+    [Fact]
+    public void Quarantine_That_Cannot_Finish_Puts_The_Database_Back()
+    {
+        // The main file moved but a sibling would not (another handle on
+        // it): a database separated from its WAL has lost whatever the WAL
+        // held, and a fresh database beside a stranger's WAL is worse. So
+        // the move is undone and the caller is told.
+        var path = Path.Combine(_dir, "history.db");
+        File.WriteAllText(path, "main");
+        File.WriteAllText(path + "-wal", "wal");
+        using (new FileStream(path + "-wal", FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            Assert.ThrowsAny<IOException>(() => HistoryStore.Quarantine(path, new DateTime(2026, 3, 14, 21, 5, 1)));
+        }
+
+        Assert.Equal("main", File.ReadAllText(path));
+        Assert.Equal("wal", File.ReadAllText(path + "-wal"));
+        Assert.Empty(Directory.GetFiles(_dir, "history.db.corrupt-*"));
+    }
 }

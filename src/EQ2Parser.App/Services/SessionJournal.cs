@@ -18,24 +18,30 @@ namespace EQ2Parser.App.Services;
 ///     plus a once-a-minute heartbeat with memory numbers. The last lines
 ///     before a dirty death say what the app was doing (and the heartbeat
 ///     trend catches OOM creep).
-///  2. WER LocalDumps self-registration (HKCU — no admin), keyed on the
-///     RUNNING image name: Windows itself writes a minidump to
-///     crashes\dumps on any native crash or stack overflow, exactly the
-///     deaths we can't catch in-process. The journal records the request,
-///     so a later postmortem knows whether "no dump" means anything.
-///  3. Startup post-mortem: a previous session.log without the clean-exit
-///     mark means the last run died. Its journal is copied into the
-///     crashes folder and the Windows Application event log is searched
-///     for matching Application Error / .NET Runtime / WER entries
-///     (faulting module + exception code) — the user just sends the
-///     crashes folder instead of spelunking Event Viewer. The header names
-///     any crash report that session wrote: a fatal, crash-loop or
+///  2. Windows crash dumps, FOUND rather than requested. Windows Error
+///     Reporting writes a minidump on a native crash or stack overflow —
+///     exactly the deaths we can't catch in-process — but only when the
+///     MACHINE has local dumps enabled (a key under HKEY_LOCAL_MACHINE,
+///     which takes an administrator to create). Earlier builds wrote the
+///     same settings under HKEY_CURRENT_USER instead; Windows ignores them
+///     there (see <see cref="NoteCrashDumps"/>), so this build writes
+///     nothing, removes those keys, and records in the journal whether the
+///     machine has dumps on and where one would land. The next launch's
+///     postmortem then looks in every place a dump could be.
+///  3. Startup post-mortem: a previous session.log that does not END with
+///     the clean-exit mark means the last run died. Its journal is copied
+///     into the crashes folder and the Windows Application event log is
+///     searched for matching Application Error / .NET Runtime / WER
+///     entries (faulting module + exception code) — the user just sends
+///     the crashes folder instead of spelunking Event Viewer. The header
+///     names any crash report that session wrote: a fatal, crash-loop or
 ///     failed-startup exit skips the clean-exit mark too, and those DO
 ///     leave a managed report.
 ///
-/// An empty postmortem (no crash report, no event-log entry, no dump,
-/// journal simply stops) is itself diagnostic: outright process
-/// termination, i.e. antivirus.
+/// An empty postmortem (no crash report, no event-log entry, journal
+/// simply stops) is itself diagnostic: outright process termination, i.e.
+/// antivirus. A missing DUMP is not part of that reading unless the
+/// machine had dumps enabled — on most machines none could exist.
 /// </summary>
 public static class SessionJournal
 {
@@ -45,20 +51,30 @@ public static class SessionJournal
 
     private const string LocalDumpsKey = @"Software\Microsoft\Windows\Windows Error Reporting\LocalDumps";
 
-    /// <summary>The image name earlier builds registered. No shipped
-    /// executable is called that (the apphost is named after the
-    /// assembly), so the key matched nothing — it is ours, and it goes.</summary>
+    /// <summary>The image name builds up to v0.5.7 registered under
+    /// HKEY_CURRENT_USER. No shipped executable is called that (the
+    /// apphost is named after the assembly).</summary>
     private const string StaleDumpImage = "EQ2Parser.exe";
 
-    /// <summary>Journal breadcrumb left when the dump request was written.
-    /// The NEXT launch's postmortem looks for it: only a session that asked
-    /// for dumps can read anything into not having one.</summary>
-    internal const string DumpsRequestedMark = "crash dumps requested for ";
+    /// <summary>Where Windows puts local dumps when nothing names another
+    /// folder, as its own setting spells it.</summary>
+    internal const string DefaultDumpFolder = @"%LOCALAPPDATA%\CrashDumps";
+
+    /// <summary>Journal breadcrumbs for what <see cref="NoteCrashDumps"/>
+    /// found. The NEXT launch's postmortem looks for them: only a session
+    /// on a machine with dumps enabled can read anything into not having
+    /// one, and a journal with neither (an older build's) says nothing.</summary>
+    internal const string DumpsOnMark = "crash dumps ON — ";
+    internal const string DumpsOffMark = "crash dumps OFF — ";
 
     public static string FilePath => Path.Combine(AppSettings.Directory, "session.log");
 
     private static DateTime _lastHeartbeat;
     private static DateTime _lastTts;
+
+    /// <summary>The journal file <see cref="End"/> closed, while it is
+    /// still the current one. Guarded by <see cref="Gate"/>.</summary>
+    private static string? _endedFile;
 
     /// <summary>Call once, immediately after CrashLog.Install — everything
     /// here must survive a startup crash one line later.</summary>
@@ -74,10 +90,11 @@ public static class SessionJournal
             var startedAt = DateTime.Now;
             lock (Gate)
             {
+                _endedFile = null;
                 File.WriteAllText(FilePath,
                     Line($"session start — EQ2Parser {CrashLog.Version} · {Environment.OSVersion} · .NET {Environment.Version}"));
             }
-            RegisterCrashDumps();
+            NoteCrashDumps();
             if (previous is not null)
                 _ = Task.Run(() => WritePostmortem(previous, startedAt));
         }
@@ -88,18 +105,27 @@ public static class SessionJournal
     }
 
     /// <summary>Timestamped breadcrumb; cheap enough for coarse events
-    /// (startup stages, source add/remove, command-file writes).</summary>
+    /// (startup stages, source add/remove, command-file writes). Ignored
+    /// once <see cref="End"/> has closed this session's journal.</summary>
     public static void Mark(string what)
     {
         try
         {
             lock (Gate)
-                File.AppendAllText(FilePath, Line(what));
+            {
+                var file = FilePath;
+                if (IsEnded(file))
+                    return;
+                File.AppendAllText(file, Line(what));
+            }
         }
         catch
         {
         }
     }
+
+    private static bool IsEnded(string file) =>
+        _endedFile is { } ended && string.Equals(ended, file, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Piggybacks the shell tick: at most one line a minute, with
     /// the numbers that expose a leak marching toward an OOM kill.</summary>
@@ -134,8 +160,34 @@ public static class SessionJournal
         Mark(what);
     }
 
-    /// <summary>Call last in OnExit.</summary>
-    public static void End() => Mark(CleanExitMark);
+    /// <summary>Call last in OnExit. Writes the clean-exit mark and closes
+    /// the journal: nothing is appended after it for this session.
+    ///
+    /// The closing matters because the next launch reads a session as
+    /// clean only when the mark is its FINAL line (<see cref="EndedCleanly"/>).
+    /// A thread that outlives the exit sequence by a moment — a log pump
+    /// that did not stop inside its two-second join — could otherwise add
+    /// a breadcrumb after the mark and turn an ordinary exit into a
+    /// postmortem. The closing is tied to the journal FILE, so a later
+    /// session on another data folder (each test has its own) is not
+    /// affected, and <see cref="Begin"/> reopens it.</summary>
+    public static void End()
+    {
+        try
+        {
+            lock (Gate)
+            {
+                var file = FilePath;
+                if (IsEnded(file))
+                    return;
+                File.AppendAllText(file, Line(CleanExitMark));
+                _endedFile = file;
+            }
+        }
+        catch
+        {
+        }
+    }
 
     /// <summary>Invariant on purpose: the postmortem parses the stamp back,
     /// and a current-culture format writes a different YEAR on a machine
@@ -152,12 +204,41 @@ public static class SessionJournal
             if (!File.Exists(FilePath))
                 return null;
             var text = File.ReadAllText(FilePath);
-            return text.Contains(CleanExitMark, StringComparison.Ordinal) || text.Length == 0 ? null : text;
+            return text.Length == 0 || EndedCleanly(text) ? null : text;
         }
         catch
         {
             return null;
         }
+    }
+
+    /// <summary>Did the session that wrote this journal exit cleanly? Only
+    /// when its LAST line is the mark <see cref="End"/> writes, whole and
+    /// in the journal's own line form: "[stamp] clean-exit".
+    ///
+    /// It used to be "the text clean-exit appears anywhere", which any
+    /// breadcrumb could satisfy — a log named eq2log_clean-exit.txt in a
+    /// "source added" line, an exception type, a future mark that merely
+    /// mentions it — and a session that then died was read as a clean one:
+    /// no postmortem, the evidence overwritten by the next start. Now the
+    /// last line has to BE the mark, stamp and all, so text inside another
+    /// breadcrumb cannot pass for it, and neither can a real mark that
+    /// something was still written after.
+    ///
+    /// The stamp is checked for shape, not parsed: a journal an older build
+    /// wrote under a non-Gregorian calendar has the shape and a year this
+    /// build would not read back.</summary>
+    internal static bool EndedCleanly(string journal)
+    {
+        var text = journal.AsSpan().TrimEnd("\r\n");
+        var last = text[(text.LastIndexOfAny('\r', '\n') + 1)..];
+        // "[" + stamp + "] " + mark
+        var markAt = StampFormat.Length + 3;
+        return last.Length == markAt + CleanExitMark.Length
+            && last[0] == '['
+            && last[StampFormat.Length + 1] == ']'
+            && last[StampFormat.Length + 2] == ' '
+            && last[markAt..].SequenceEqual(CleanExitMark);
     }
 
     private static void WritePostmortem(string previousJournal, DateTime nextSessionStart)
@@ -168,13 +249,16 @@ public static class SessionJournal
             var (ending, other) = start is { } from
                 ? ReportsFromSession(ReportFileNames(), from, nextSessionStart)
                 : ([], []);
+            var image = DumpImageName(Environment.ProcessPath);
             var report = new StringBuilder()
                 .Append(PostmortemHeader(
                     startKnown: start is not null,
                     ending,
                     other,
-                    dumpsRequested: previousJournal.Contains(DumpsRequestedMark, StringComparison.Ordinal),
-                    dumps: start is { } since ? DumpsSince(since) : []))
+                    dumpsEnabled: DumpsEnabledDuring(previousJournal),
+                    dumps: start is { } since
+                        ? DumpsFromSession(DumpCandidates(image), image, OwnDumpFolder, since)
+                        : []))
                 .AppendLine()
                 .AppendLine("── previous session journal ──────────────────────────────────────────")
                 .AppendLine(previousJournal.TrimEnd())
@@ -237,12 +321,17 @@ public static class SessionJournal
     /// <summary>The words above the journal. They must fit what the session
     /// actually left behind: "no managed crash report" used to be printed
     /// even with a fatal report sitting right beside this file, which sent
-    /// the reader hunting for an antivirus.</summary>
+    /// the reader hunting for an antivirus.
+    ///
+    /// <paramref name="dumpsEnabled"/> is what the dead session's journal
+    /// recorded about the machine (<see cref="DumpsEnabledDuring"/>): true
+    /// or false, or null when it recorded nothing. <paramref name="dumps"/>
+    /// are full paths (<see cref="DumpsFromSession"/>).</summary>
     internal static string PostmortemHeader(
         bool startKnown,
         IReadOnlyList<string> ending,
         IReadOnlyList<string> other,
-        bool dumpsRequested,
+        bool? dumpsEnabled,
         IReadOnlyList<string> dumps)
     {
         var header = new StringBuilder();
@@ -293,29 +382,43 @@ public static class SessionJournal
         {
             header
                 .AppendLine()
-                .AppendLine("Windows saved a crash dump during that session (crashes\\dumps):");
+                .AppendLine("Windows saved a crash dump during that session. It is still where")
+                .AppendLine("Windows wrote it (nothing was copied or opened):");
             AppendNames(header, dumps);
         }
-        else if (ending.Count == 0 && dumpsRequested)
+        else if (ending.Count == 0 && dumpsEnabled == true)
+        {
+            // The one case where a missing dump carries any weight — and
+            // even then it is a lean, not a proof.
+            header
+                .AppendLine()
+                .AppendLine("That session recorded that this machine has Windows local crash dumps")
+                .AppendLine("enabled, and no dump from it was found. A native crash would normally")
+                .AppendLine("have left one, so together with an empty event-log section this leans")
+                .AppendLine("toward a termination from outside (check the AV's protection history)")
+                .AppendLine("or a forced end (Task Manager, power loss). It is not proof.");
+        }
+        else if (ending.Count == 0 && dumpsEnabled == false)
         {
             header
                 .AppendLine()
-                .AppendLine("That session had asked Windows for a dump on a native crash, and")
-                .AppendLine("crashes\\dumps has no new .dmp. If the event-log section is empty as")
-                .AppendLine("well, the likeliest cause is a termination from outside (check the")
-                .AppendLine("AV's protection history).");
+                .AppendLine("That session recorded that this machine does NOT have Windows local")
+                .AppendLine("crash dumps enabled (turning them on takes an administrator), so no dump")
+                .AppendLine("could have been written: a missing one says nothing either way. An")
+                .AppendLine("empty event-log section still points at a termination from outside")
+                .AppendLine("(check the AV's protection history).");
         }
         else if (ending.Count == 0)
         {
-            // A session that never asked for dumps (older builds registered
-            // the wrong executable name) proves nothing by not having one.
+            // A journal from a build up to v0.5.7, or one that could not
+            // read the setting: nothing is known, so nothing is claimed.
             header
                 .AppendLine()
-                .AppendLine("That session did not record asking Windows for crash dumps (older")
-                .AppendLine("builds registered the wrong executable name), so a missing .dmp in")
-                .AppendLine("crashes\\dumps says nothing either way. An empty event-log section")
-                .AppendLine("still points at a termination from outside (check the AV's")
-                .AppendLine("protection history).");
+                .AppendLine("That session did not record whether this machine has Windows local")
+                .AppendLine("crash dumps enabled (older builds asked for dumps in a way Windows")
+                .AppendLine("ignores), so a missing dump says nothing either way. An empty")
+                .AppendLine("event-log section still points at a termination from outside (check")
+                .AppendLine("the AV's protection history).");
         }
         return header.ToString();
     }
@@ -338,21 +441,95 @@ public static class SessionJournal
         }
     }
 
-    /// <summary>Dumps Windows wrote since the dead session began. No upper
-    /// bound needed: this launch is moments old and has not crashed.</summary>
-    private static List<string> DumpsSince(DateTime sessionStart)
+    /// <summary>The app's own dump folder: where the per-application
+    /// setting a tester can add points (the triage notes have the
+    /// command), and where earlier builds asked for dumps.</summary>
+    private static string OwnDumpFolder => Path.Combine(CrashLog.Directory, "dumps");
+
+    /// <summary>What the dead session's journal recorded about the machine:
+    /// local dumps on, off, or (an older build's journal, or a setting that
+    /// could not be read) nothing at all.</summary>
+    internal static bool? DumpsEnabledDuring(string journal) =>
+        journal.Contains(DumpsOnMark, StringComparison.Ordinal) ? true
+        : journal.Contains(DumpsOffMark, StringComparison.Ordinal) ? false
+        : null;
+
+    /// <summary>Which of the candidate files are crash dumps of THIS app
+    /// from the dead session — as full paths, sorted. Pure: the caller
+    /// lists the folders (<see cref="DumpCandidates"/>).
+    ///
+    ///  * Written at or after the session began. No upper bound needed:
+    ///    this launch is moments old and has not crashed.
+    ///  * In the app's own dump folder, any .dmp counts — nothing else
+    ///    writes there.
+    ///  * Anywhere else the folder is SHARED (Windows' default
+    ///    %LOCALAPPDATA%\CrashDumps holds every program's dumps), so only
+    ///    the name Windows gives this executable's dumps counts:
+    ///    "&lt;image&gt;.&lt;process id&gt;.dmp". With no image name (a
+    ///    run under a shared host such as dotnet.exe) nothing in a shared
+    ///    folder can be told apart, and nothing there is claimed.
+    /// The files are only named. They are never opened, copied or moved:
+    /// a dump is a copy of the process's memory and stays where Windows
+    /// put it until its owner decides otherwise.</summary>
+    internal static List<string> DumpsFromSession(
+        IEnumerable<(string Path, DateTime Written)> candidates, string? image, string ownFolder, DateTime sessionStart)
     {
+        var own = Path.TrimEndingDirectorySeparator(ownFolder);
+        SortedSet<string> found = new(StringComparer.OrdinalIgnoreCase);
+        foreach (var (path, written) in candidates)
+        {
+            if (written < sessionStart || !path.EndsWith(".dmp", StringComparison.OrdinalIgnoreCase))
+                continue;
+            var inOwnFolder = string.Equals(
+                Path.TrimEndingDirectorySeparator(Path.GetDirectoryName(path) ?? ""), own, StringComparison.OrdinalIgnoreCase);
+            if (inOwnFolder || IsDumpOf(Path.GetFileName(path), image))
+                found.Add(path);
+        }
+        return [.. found];
+    }
+
+    /// <summary>"EQ2Parser.App.exe.1234.dmp" for image "EQ2Parser.App.exe".</summary>
+    private static bool IsDumpOf(string fileName, string? image)
+    {
+        if (string.IsNullOrEmpty(image)
+            || fileName.Length <= image.Length + 1 + ".dmp".Length
+            || !fileName.StartsWith(image + ".", StringComparison.OrdinalIgnoreCase)
+            || !fileName.EndsWith(".dmp", StringComparison.OrdinalIgnoreCase))
+            return false;
+        var processId = fileName.AsSpan(image.Length + 1, fileName.Length - image.Length - 1 - ".dmp".Length);
+        return processId.Length > 0 && processId.IndexOfAnyExceptInRange('0', '9') < 0;
+    }
+
+    /// <summary>Every .dmp in the places a dump of this app could be: its
+    /// own folder, Windows' default folder, and the folder the machine's
+    /// LocalDumps settings name (if any). Names and write times only.</summary>
+    private static List<(string Path, DateTime Written)> DumpCandidates(string? image)
+    {
+        List<string> folders = [OwnDumpFolder, Environment.ExpandEnvironmentVariables(DefaultDumpFolder)];
         try
         {
-            var folder = new DirectoryInfo(Path.Combine(CrashLog.Directory, "dumps"));
-            return folder.Exists
-                ? [.. folder.GetFiles("*.dmp").Where(f => f.LastWriteTime >= sessionStart).Select(f => f.Name).Order(StringComparer.Ordinal)]
-                : [];
+            if (image is not null && MachineDumpFolder(image) is { Length: > 0 } configured)
+                folders.Add(Environment.ExpandEnvironmentVariables(configured));
         }
         catch
         {
-            return [];
+            // Settings unreadable: the two known folders still get checked.
         }
+        List<(string, DateTime)> candidates = [];
+        foreach (var folder in folders.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            try
+            {
+                var info = new DirectoryInfo(folder);
+                if (info.Exists)
+                    candidates.AddRange(info.GetFiles("*.dmp").Select(f => (f.FullName, f.LastWriteTime)));
+            }
+            catch
+            {
+                // An unreadable folder is a folder with nothing to report.
+            }
+        }
+        return candidates;
     }
 
     private static void HarvestEventLog(StringBuilder report)
@@ -395,54 +572,100 @@ public static class SessionJournal
         }
     }
 
-    /// <summary>Ask Windows Error Reporting for a local minidump on native
-    /// deaths. HKCU works without admin and WER honours per-app LocalDumps
-    /// keys there; DumpType 1 = minidump, keep the last five.
+    /// <summary>Record, for the next launch's postmortem, whether a native
+    /// death of this process can leave a Windows crash dump — and tidy up
+    /// after the builds that tried to make sure of it.
     ///
-    /// WER matches the key on the crashing process's IMAGE FILE NAME, so
-    /// the name comes from the running process — the key used to be a
-    /// hard-coded "EQ2Parser.exe" while the shipped executable is named
-    /// after the assembly, so the request could not match it.</summary>
-    private static void RegisterCrashDumps()
+    /// What is true, checked on Windows 11 with a process made to die both
+    /// ways (a fail-fast and an unhandled exception):
+    ///  * Windows Error Reporting reads its LocalDumps settings from
+    ///    HKEY_LOCAL_MACHINE only. The same values under HKEY_CURRENT_USER
+    ///    — which is what every earlier build wrote, because that hive
+    ///    needs no administrator — are IGNORED: nothing arrived in the
+    ///    folder they named.
+    ///  * When the machine-wide LocalDumps key exists (other software, or
+    ///    an administrator, created it) Windows does write a dump, named
+    ///    "&lt;image&gt;.&lt;process id&gt;.dmp", into
+    ///    %LOCALAPPDATA%\CrashDumps.
+    ///  * When it does not exist there is no dump, and creating it takes
+    ///    administrator rights a per-user install does not have.
+    /// One thing here is from Microsoft's documentation rather than from
+    /// that check: the machine key, or a per-application key beneath it,
+    /// can name a different folder (DumpFolder). <see cref="MachineDumpFolder"/>
+    /// reads it so the journal and the lookup follow it.
+    /// So the app can only LOOK: this reads the machine key (read-only),
+    /// journals what it found, and the postmortem searches the folders a
+    /// dump could be in (<see cref="DumpCandidates"/>). A missing dump
+    /// means something only on a machine that had dumps on.
+    ///
+    /// The cleanup removes the per-user keys those builds left: the image
+    /// name builds up to v0.5.7 hard-coded, and this executable's own name
+    /// (later builds). They do nothing, and a setting that does nothing but
+    /// looks like the reason dumps appear, or fail to, is worth removing.
+    ///
+    /// Only when this process is the app's own executable: under a shared
+    /// host (dotnet.exe, a test host) there is no image name to speak for
+    /// and no business in the registry.</summary>
+    private static void NoteCrashDumps()
     {
         try
         {
             if (DumpImageName(Environment.ProcessPath) is not { } image)
                 return;
-            RemoveStaleDumpKey(image);
-            using var key = Registry.CurrentUser.CreateSubKey($@"{LocalDumpsKey}\{image}");
-            key.SetValue("DumpFolder", Path.Combine(CrashLog.Directory, "dumps"), RegistryValueKind.ExpandString);
-            key.SetValue("DumpType", 1, RegistryValueKind.DWord);
-            key.SetValue("DumpCount", 5, RegistryValueKind.DWord);
-            Mark(DumpsRequestedMark + image);
+            RemovePerUserDumpKeys(image);
+            var folder = MachineDumpFolder(image);
+            Mark(folder is null
+                ? $"{DumpsOffMark}Windows local dumps are not enabled on this machine (it takes an administrator), so a native crash of {image} leaves no dump"
+                : $"{DumpsOnMark}Windows local dumps are enabled on this machine; a native crash of {image} leaves {image}.<pid>.dmp in {(folder.Length > 0 ? folder : DefaultDumpFolder)}");
         }
         catch
         {
+            // Unreadable settings: no line, and the postmortem then claims
+            // nothing about dumps either way.
         }
     }
 
-    /// <summary>Best-effort and separate from the registration: a key that
-    /// will not delete must not cost the dumps.</summary>
-    private static void RemoveStaleDumpKey(string image)
+    /// <summary>The machine's answer for this image: null when local dumps
+    /// are not enabled (no LocalDumps key under HKEY_LOCAL_MACHINE), ""
+    /// when they are and no folder is named (Windows' default applies), or
+    /// the folder as the setting spells it, environment variables
+    /// unexpanded — a per-application key's value before the machine-wide
+    /// one. Read-only; throws when the registry cannot be read. The 64-bit
+    /// view explicitly: that is the one Windows Error Reporting uses.</summary>
+    private static string? MachineDumpFolder(string image)
     {
-        // Never the key about to be written, should the executable ever
-        // really be called that.
-        if (string.Equals(image, StaleDumpImage, StringComparison.OrdinalIgnoreCase))
-            return;
-        try
+        using var machine = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64);
+        using var all = machine.OpenSubKey(LocalDumpsKey);
+        if (all is null)
+            return null;
+        using var mine = all.OpenSubKey(image);
+        return mine?.GetValue("DumpFolder", null, RegistryValueOptions.DoNotExpandEnvironmentNames) as string
+            ?? all.GetValue("DumpFolder", null, RegistryValueOptions.DoNotExpandEnvironmentNames) as string
+            ?? "";
+    }
+
+    /// <summary>Best-effort, each key by itself: one that will not delete
+    /// must not keep the other, or cost the journal its line.</summary>
+    private static void RemovePerUserDumpKeys(string image)
+    {
+        foreach (var name in new[] { StaleDumpImage, image }.Distinct(StringComparer.OrdinalIgnoreCase))
         {
-            Registry.CurrentUser.DeleteSubKeyTree($@"{LocalDumpsKey}\{StaleDumpImage}", throwOnMissingSubKey: false);
-        }
-        catch
-        {
+            try
+            {
+                Registry.CurrentUser.DeleteSubKeyTree($@"{LocalDumpsKey}\{name}", throwOnMissingSubKey: false);
+            }
+            catch
+            {
+            }
         }
     }
 
-    /// <summary>The image name to register dumps under, or null when this
-    /// process is not the app's own executable. A framework-dependent run
-    /// ("dotnet EQ2Parser.App.dll") or a test host is a SHARED image:
-    /// registering it would have Windows dump every unrelated program that
-    /// runs under the same host into our crashes folder.</summary>
+    /// <summary>The image name Windows files this process's dumps under
+    /// ("&lt;image&gt;.&lt;process id&gt;.dmp"), or null when this process
+    /// is not the app's own executable. A framework-dependent run
+    /// ("dotnet EQ2Parser.App.dll") or a test host is a SHARED image: its
+    /// dumps cannot be told from those of every unrelated program run
+    /// under the same host, and its registry keys are not ours to tidy.</summary>
     internal static string? DumpImageName(string? processPath)
     {
         var image = Path.GetFileName(processPath);
