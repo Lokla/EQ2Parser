@@ -113,7 +113,7 @@ public sealed partial class MainParseViewModel
                         var allyDamage = allies.Sum(r => r.Damage) + pets.Sum(r => r.Damage);
                         breadcrumb = Describe(
                             aggregate.Zone,
-                            Loc.Format("MainVm_AggregateTitle", LocalizeAggregateLabel(aggregate.Label), aggregate.Fights.Count),
+                            Loc.Format("MainVm_AggregateTitle", LocalizeAggregateLabel(aggregate), aggregate.Fights.Count),
                             aggregate.Duration, allyDamage / ((IFightView)aggregate).DisplaySeconds, live: false);
                         break;
                     }
@@ -309,13 +309,14 @@ public sealed partial class MainParseViewModel
 
     /// <summary>Rollup labels ("All" / "All Bosses") are stored English —
     /// they feed clipboard/report output, which deliberately stays English —
-    /// so the on-screen breadcrumb localizes them at display time.</summary>
-    private static string LocalizeAggregateLabel(string label) => label switch
+    /// so the on-screen breadcrumb localizes them at display time. A
+    /// multi-selection is recognised by its marker, not its label.</summary>
+    private static string LocalizeAggregateLabel(AggregateFights aggregate) => aggregate switch
     {
-        "All" => Loc.Get("MainVm_LabelAll"),
-        "All Bosses" => Loc.Get("MainVm_LabelAllBosses"),
-        SelectionLabel => Loc.Get("MainVm_LabelSelected"),
-        _ => label,
+        { IsSelection: true } => Loc.Get("MainVm_LabelSelected"),
+        { Label: "All" } => Loc.Get("MainVm_LabelAll"),
+        { Label: "All Bosses" } => Loc.Get("MainVm_LabelAllBosses"),
+        _ => aggregate.Label,
     };
 
     private static string Describe(string zone, string title, TimeSpan duration, double dps, bool live)

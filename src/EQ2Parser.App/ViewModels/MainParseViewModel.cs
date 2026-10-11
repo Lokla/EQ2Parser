@@ -38,11 +38,22 @@ public sealed class ParseNode
     public IReadOnlyList<CorrelatedEncounter>? GroupFights { get; init; }
 }
 
-/// <summary>A zone rollup selection: combined stats over several fights.
+/// <summary>A zone rollup selection, or a Ctrl/Shift multi-selection of
+/// fights: combined stats over several fights.
 /// Implements <see cref="IFightView"/> so shared fight maths (durations,
 /// display rates, combatant instances) needs no per-shape switch; rollup
 /// EncDPS uses the COMBINED duration (over the merged fight).</summary>
-public sealed record AggregateFights(string Zone, string Label, IReadOnlyList<CorrelatedEncounter> Fights) : IFightView
+/// <param name="Zone">The zone the fights share, or the selected fights'
+/// zones joined when <paramref name="IsSelection"/> spans several.</param>
+/// <param name="Label">Stored English ("All", "All Bosses", "Selected") —
+/// it feeds clipboard output; the breadcrumb localizes it at display time.</param>
+/// <param name="Fights">The member fights, oldest first.</param>
+/// <param name="IsSelection">True for a Ctrl/Shift multi-selection (a fixed
+/// set of fights picked by hand), false for a zone's "All" / "All Bosses"
+/// rollup. Code that treats the two differently tests this, never the
+/// label text, so renaming a label cannot change behaviour.</param>
+public sealed record AggregateFights(
+    string Zone, string Label, IReadOnlyList<CorrelatedEncounter> Fights, bool IsSelection = false) : IFightView
 {
     public string Title => Label;
     public DateTimeOffset StartTime => Fights.Count > 0 ? Fights.Min(f => f.StartTime) : default;
@@ -113,7 +124,9 @@ public sealed record AggregateFights(string Zone, string Label, IReadOnlyList<Co
 
 /// <summary>A zone-header selection: the encounter-list summary view. The
 /// group is re-resolved from history each refresh (so a live zone gains new
-/// fights); Snapshot is the click-time fallback if the group re-shapes.</summary>
+/// fights); Snapshot is the fallback if the group re-shapes — the group's
+/// fights at the click, or at the last tree rebuild that still showed the
+/// header (<see cref="FightSelection.Counterpart"/>).</summary>
 public sealed record ZoneFights(string Zone, string GroupKey, IReadOnlyList<CorrelatedEncounter> Snapshot);
 
 /// <summary>One encounter row of the zone-summary table.</summary>
@@ -606,6 +619,18 @@ public sealed partial class MainParseViewModel : ObservableObject
             }
         }
 
+        // A pinned "All" / "All Bosses" rollup or zone header was built by
+        // the PREVIOUS tree; this one carries a fresh object for the same
+        // zone group. Move the pin onto it, so the node stays highlighted
+        // (IsTreeSelected compares references) and the grid shows what the
+        // highlighted node now holds — a rollup gains the fights that ended
+        // since, as the zone summary always has. Highlighting without moving
+        // the pin would mark a node the grid no longer matches, and a
+        // highlighted node cannot be clicked again to catch up. Snapshot
+        // lists and reference comparisons only, so no lock.
+        if (FightSelection.Counterpart(_pinnedFight, nodes) is { } counterpart)
+            _pinnedFight = counterpart;
+
         TreeNodes.ReplaceAll(nodes);
         TreeRebuilt?.Invoke();
     }
@@ -787,47 +812,49 @@ public sealed partial class MainParseViewModel : ObservableObject
             return;
         // StartTime/Zone walk the fight's live source list, which the pump
         // appends to when another log merges in — snapshot under the lock.
-        List<CorrelatedEncounter> fights;
-        string zone;
+        AggregateFights? selection;
         lock (manager.Sync)
         {
-            fights = [.. selected
-                .Where(n => n.IsFight)
-                .Select(n => n.Fight)
-                .OfType<CorrelatedEncounter>()
-                .Distinct()
-                .OrderBy(f => f.StartTime)];
-            zone = string.Join(" / ", fights.Select(f => f.Zone).Distinct(StringComparer.OrdinalIgnoreCase));
+            selection = FightSelection.Combine(selected);
         }
-        if (fights.Count < 2)
+        if (selection is null)
         {
             SelectNode(focus ?? selected[^1]);
             return;
         }
-        _pinnedFight = new AggregateFights(zone, SelectionLabel, fights);
+        _pinnedFight = selection;
         FollowLive = false;
         FollowSelectionInOverlay();
         RefreshGrid();
     }
 
     /// <summary>Whether a freshly rebuilt tree node should show selected:
-    /// the pinned fight itself, or a member of the pinned multi-selection.</summary>
+    /// the pinned fight, rollup or zone header itself (<see cref="RebuildTree"/>
+    /// moves a pinned rollup or header onto its rebuilt node), or a member
+    /// of the pinned multi-selection.</summary>
     public bool IsTreeSelected(ParseNode node)
     {
-        if (FollowLive || node.Fight is not CorrelatedEncounter fight)
+        // The null check matters: date headers carry no fight, and with
+        // nothing pinned a bare reference comparison would accept them all.
+        if (FollowLive || node.Fight is not { } target)
             return false;
-        return ReferenceEquals(_pinnedFight, fight)
-            || (_pinnedFight is AggregateFights { Label: SelectionLabel } selection && selection.Fights.Contains(fight));
+        return ReferenceEquals(_pinnedFight, target)
+            || (target is CorrelatedEncounter fight
+                && _pinnedFight is AggregateFights { IsSelection: true } selection
+                && selection.Fights.Contains(fight));
     }
 
     /// <summary>Context-menu target: a right-clicked fight that belongs to
     /// the current multi-selection stands for the whole selection (Explorer
-    /// semantics — delete/copy/upload act on everything selected).</summary>
+    /// semantics — delete/copy/upload act on everything selected).
+    /// Right-clicking a fight OUTSIDE the selection acts on that one fight
+    /// and leaves the selection highlighted: unlike Explorer, WPF's ListBox
+    /// does not move the selection on a right-click.</summary>
     private ParseNode? WidenToSelection(ParseNode? node)
     {
         if (FollowLive
             || node?.Fight is not CorrelatedEncounter fight
-            || _pinnedFight is not AggregateFights { Label: SelectionLabel } selection
+            || _pinnedFight is not AggregateFights { IsSelection: true } selection
             || !selection.Fights.Contains(fight))
             return node;
         return new ParseNode
