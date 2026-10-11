@@ -1,3 +1,4 @@
+using EQ2Parser.App.Localization;
 using EQ2Parser.App.Views;
 
 namespace EQ2Parser.App.Services;
@@ -80,22 +81,27 @@ public sealed class OverlayController(SourceManager manager)
                 OverlayKind.Notifications => new NotificationsContent(manager),
                 _ => new TimerPanelContent(manager, panel: 1),
             };
-            var title = kind switch
-            {
-                OverlayKind.MiniParseDps => "DPS — drag, then lock",
-                OverlayKind.MiniParseHps => "HEALING — drag, then lock",
-                OverlayKind.MiniParseTank => "TANKING — drag, then lock",
-                OverlayKind.TimerB => "TIMERS B — drag, then lock",
-                OverlayKind.Notifications => "ALERTS — drag, then lock",
-                _ => "TIMERS — drag, then lock",
-            };
-            var window = new OverlayShellWindow(this, kind, title, content, settings);
+            var window = new OverlayShellWindow(this, kind, TitleFor(kind), content, settings);
             window.Closed += (_, _) => _windows.Remove(kind);
             _windows[kind] = window;
             window.Show();
         }
         Update(kind, s => s with { Visible = true });
     }
+
+    /// <summary>The header an unlocked overlay window shows: what it is,
+    /// and the hint to drag it into place and lock it. One whole string
+    /// per kind — the hint is not appended, so a translation is free to
+    /// order the two halves its own way.</summary>
+    internal static string TitleFor(OverlayKind kind) => kind switch
+    {
+        OverlayKind.MiniParseDps => Loc.Get("OverlayShell_TitleDps"),
+        OverlayKind.MiniParseHps => Loc.Get("OverlayShell_TitleHps"),
+        OverlayKind.MiniParseTank => Loc.Get("OverlayShell_TitleTank"),
+        OverlayKind.TimerB => Loc.Get("OverlayShell_TitleTimerB"),
+        OverlayKind.Notifications => Loc.Get("OverlayShell_TitleNotifications"),
+        _ => Loc.Get("OverlayShell_TitleTimerA"),
+    };
 
     public void Hide(OverlayKind kind)
     {

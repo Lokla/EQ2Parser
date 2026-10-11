@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
+using EQ2Parser.App.Localization;
 
 namespace EQ2Parser.App.ViewModels;
 
@@ -65,14 +66,25 @@ public sealed class CategoryTree<TItem>
         List<TItem> custom = [.. all.Where(i => !IsLexicon(i))];
         List<TItem> lexicon = [.. all.Where(IsLexicon)];
         if (lexicon.Count > 0)
-            Rows.Add(new SectionRow("Custom", "yours — edit, drag, delete"));
+            Rows.Add(new SectionRow(Loc.Get("CategoryTree_SectionCustom"), Loc.Get("CategoryTree_SectionCustomHint")));
         BuildSection(custom, matchesFilter, filtering, keyPrefix: "");
         if (lexicon.Count > 0)
         {
-            Rows.Add(new SectionRow("Lexicon", $"curated on {LexiconHost()} — enable/disable here, edit there"));
+            // "Lexicon" is the site's name and stays as it is.
+            Rows.Add(new SectionRow("Lexicon", Loc.Format("CategoryTree_SectionLexiconHint", LexiconHost())));
             BuildSection(lexicon, matchesFilter, filtering, keyPrefix: "lex|");
         }
     }
+
+    /// <summary>What a zone header shows. The key of the no-zone group is
+    /// the literal "General" everywhere it is compared, stored or used as
+    /// collapse state; only the header's text is translated.</summary>
+    private static string ZoneTitle(string zoneKey) =>
+        string.Equals(zoneKey, GeneralZoneKey, StringComparison.OrdinalIgnoreCase)
+            ? Loc.Get("CategoryTree_ZoneGeneral")
+            : zoneKey;
+
+    private const string GeneralZoneKey = "General";
 
     private void BuildSection(List<TItem> items, Func<TItem, bool> matchesFilter, bool filtering, string keyPrefix)
     {
@@ -90,7 +102,7 @@ public sealed class CategoryTree<TItem>
             var zoneKey = keyPrefix + zoneGroup.Key;
             // Zones default OPEN (there are few); categories default closed.
             var zoneExpanded = filtering || !_collapsedZones.Contains(zoneKey);
-            Rows.Add(new ZoneRow(zoneGroup.Key, zoneExpanded)
+            Rows.Add(new ZoneRow(ZoneTitle(zoneGroup.Key), zoneExpanded)
             {
                 Key = zoneKey,
                 Count = zoneMembers.Count,

@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using EQ2Parser.App.Localization;
 using EQ2Parser.App.Services;
 using Microsoft.Win32;
 
@@ -11,7 +12,12 @@ public sealed partial class SourceRow(LogSource source) : ObservableObject
     public LogSource Source { get; } = source;
     public string Owner => Source.Owner;
     public string Path => Source.Path;
-    public string Mode => Source.AutoDiscovered ? "auto" : Source.ParseFromStart ? "full file" : "live tail";
+
+    /// <summary>The pill beside the owner's name: how this log came to
+    /// be tailed.</summary>
+    public string Mode => Source.AutoDiscovered
+        ? Loc.Get("Sources_ModeAuto")
+        : Source.ParseFromStart ? Loc.Get("Sources_ModeFullFile") : Loc.Get("Sources_ModeLiveTail");
 
     [ObservableProperty]
     private string _status = "";
@@ -36,7 +42,7 @@ public sealed partial class SourcesViewModel(SourceManager manager) : Observable
     {
         var dialog = new OpenFolderDialog
         {
-            Title = "Choose the EQ2 logs folder (server subfolders are scanned too)",
+            Title = Loc.Get("Sources_ChooseLogsFolderTitle"),
         };
         if (dialog.ShowDialog() != true)
             return;
@@ -69,8 +75,8 @@ public sealed partial class SourcesViewModel(SourceManager manager) : Observable
     {
         var dialog = new OpenFileDialog
         {
-            Title = "Choose an EQ2 log file",
-            Filter = "EQ2 logs (eq2log_*.txt)|eq2log_*.txt|All files (*.*)|*.*",
+            Title = Loc.Get("Sources_ChooseLogFileTitle"),
+            Filter = Loc.Get("Sources_LogFileFilter"),
         };
         if (dialog.ShowDialog() != true)
             return;
@@ -103,17 +109,29 @@ public sealed partial class SourcesViewModel(SourceManager manager) : Observable
     /// Sync lock (engine state is read). "error:" means the tail has
     /// STOPPED. A source that only had to skip lines is still reading, so
     /// its skips ride on the end of the normal counters instead — calling
-    /// it dead would send the user off to re-add a log that is working.</summary>
+    /// it dead would send the user off to re-add a log that is working.
+    ///
+    /// Each part is a whole dictionary string and the parts are joined
+    /// with <see cref="StatusSeparator"/>, so no language has to fit its
+    /// words around another's order. Two things in the line stay as they
+    /// come: the error message (an exception's own text) and the exception
+    /// type name, which is what the user quotes from the crashes folder.</summary>
     internal static string StatusFor(LogSource source)
     {
         if (source.Error is { } error)
-            return $"error: {error.Message}";
+            return Loc.Format("Sources_StatusError", error.Message);
+        var status = Loc.Format(
+            "Sources_StatusCounts",
+            source.Processor.LinesSeen, source.Processor.LinesMatched, source.Engine.History.Count);
+        if (source.Engine.InCombat)
+            status += StatusSeparator + Loc.Get("Sources_StatusInCombat");
         var skipped = source.SkippedLines;
-        return $"{source.Processor.LinesSeen:N0} lines · {source.Processor.LinesMatched:N0} matched · {source.Engine.History.Count} encounters{(source.Engine.InCombat ? " · IN COMBAT" : "")}"
-            + (skipped > 0
-                ? $" · {skipped:N0} skipped on error (last: {source.LastLineError?.GetType().Name}) — see the crashes folder"
-                : "");
+        if (skipped > 0)
+            status += StatusSeparator + Loc.Format("Sources_StatusSkipped", skipped, source.LastLineError?.GetType().Name);
+        return status;
     }
+
+    private const string StatusSeparator = " · ";
 
     public void SyncFromManager()
     {

@@ -3,6 +3,7 @@ using System.IO;
 using System.Reflection;
 using System.Text;
 using System.Windows;
+using EQ2Parser.App.Localization;
 
 namespace EQ2Parser.App.Services;
 
@@ -74,21 +75,21 @@ public static class CrashLog
             {
                 var loopPath = Write(CrashLoopKind, e.Exception);
                 _lastDialog = DateTime.MinValue; // the last words always show
-                ShowDialog("EQ2Parser hit the same error repeatedly and has to close.", e.Exception, loopPath);
+                ShowDialog("CrashDlg_CrashLoop", e.Exception, loopPath);
                 Environment.Exit(70);
                 return;
             }
             var path = Write("ui-thread", e.Exception);
             // Handled BEFORE the dialog so a MessageBox failure can't re-crash.
             e.Handled = true;
-            ShowDialog("EQ2Parser hit an unexpected error and kept running.", e.Exception, path);
+            ShowDialog("CrashDlg_KeptRunning", e.Exception, path);
         };
         AppDomain.CurrentDomain.UnhandledException += (_, e) =>
         {
             var ex = e.ExceptionObject as Exception;
             var path = Write(FatalKind, ex);
             if (ex is not null)
-                ShowDialog("EQ2Parser hit a fatal error and has to close.", ex, path);
+                ShowDialog("CrashDlg_Fatal", ex, path);
         };
         // Background tasks that die unobserved don't crash modern .NET —
         // they just vanish. Log them so silent failures are findable too.
@@ -120,8 +121,44 @@ public static class CrashLog
     public static void ShowStartupFailure(Exception ex, string? reportPath)
     {
         _lastDialog = DateTime.MinValue; // the last words always show
-        ShowDialog("EQ2Parser could not start and has to close.", ex, reportPath);
+        ShowDialog("CrashDlg_StartupFailed", ex, reportPath);
     }
+
+    /// <summary>The words of the dialogs, in English, by dictionary key.
+    /// The dialogs are interface text and are translated like any other;
+    /// the report FILE is not — it is read by whoever debugs the crash.
+    ///
+    /// The English lives here as well as in strings.en.json because a
+    /// crash can arrive before the dictionaries do (a startup that threw
+    /// while loading the settings), and the one explanation the user gets
+    /// must not be a raw key. LocalizedTextTests holds the two copies
+    /// equal; LocalizationTests requires every key here in every language.</summary>
+    internal static readonly IReadOnlyDictionary<string, string> DialogEnglish = new Dictionary<string, string>
+    {
+        ["CrashDlg_Title"] = "EQ2Parser — error report",
+        ["CrashDlg_KeptRunning"] = "EQ2Parser hit an unexpected error and kept running.",
+        ["CrashDlg_CrashLoop"] = "EQ2Parser hit the same error repeatedly and has to close.",
+        ["CrashDlg_Fatal"] = "EQ2Parser hit a fatal error and has to close.",
+        ["CrashDlg_StartupFailed"] = "EQ2Parser could not start and has to close.",
+        ["CrashDlg_DetailsSavedTo"] = "Details saved to:",
+    };
+
+    /// <summary>One dialog string in the interface language, or its
+    /// English when the dictionaries cannot supply it.</summary>
+    internal static string DialogText(string key) => OrEnglish(key, Loc.Get(key));
+
+    /// <summary><paramref name="resolved"/> is what the dictionaries gave
+    /// for <paramref name="key"/>; a lookup that failed gives the key back.</summary>
+    internal static string OrEnglish(string key, string resolved) =>
+        string.Equals(resolved, key, StringComparison.Ordinal) && DialogEnglish.TryGetValue(key, out var english)
+            ? english
+            : resolved;
+
+    /// <summary>The dialog body: the headline, the exception's own message
+    /// (never translated — it is what the developer searches for), and
+    /// where the report was written.</summary>
+    internal static string DialogBody(string headlineKey, string message, string location) =>
+        $"{DialogText(headlineKey)}\n\n{message}\n\n{DialogText("CrashDlg_DetailsSavedTo")}\n{location}";
 
     /// <summary>True for the kinds that end the process.</summary>
     internal static bool EndsProcess(string kind) => kind is FatalKind or CrashLoopKind or StartupKind;
@@ -203,7 +240,7 @@ public static class CrashLog
         }
     }
 
-    private static void ShowDialog(string headline, Exception ex, string? path)
+    private static void ShowDialog(string headlineKey, Exception ex, string? path)
     {
         var now = DateTime.Now;
         if (now - _lastDialog < TimeSpan.FromSeconds(30))
@@ -212,8 +249,8 @@ public static class CrashLog
         try
         {
             MessageBox.Show(
-                $"{headline}\n\n{ex.Message}\n\nDetails saved to:\n{path ?? Directory}",
-                "EQ2Parser — error report", MessageBoxButton.OK, MessageBoxImage.Warning);
+                DialogBody(headlineKey, ex.Message, path ?? Directory),
+                DialogText("CrashDlg_Title"), MessageBoxButton.OK, MessageBoxImage.Warning);
         }
         catch
         {

@@ -128,10 +128,15 @@ public sealed class SourceManager : IDisposable
         {
             if (!Settings.CalloutsEnabled)
                 return;
+            // Two copies of one callout. The SPOKEN one stays English: the
+            // voice is whichever one the user picked in Settings, never one
+            // chosen for the interface language, and a translated sentence
+            // read by an English voice is worse than English. The SHOWN
+            // one (the Notifications overlay toast) is interface text.
             var word = Vocabulary.CalloutWord(effect);
-            var text = count == 1 ? $"1 player {word}" : $"{count} players {word}";
-            Audio.Speak(text);
-            CalloutAnnounced?.Invoke(text);
+            var spoken = count == 1 ? $"1 player {word}" : $"{count} players {word}";
+            Audio.Speak(spoken);
+            CalloutAnnounced?.Invoke(CalloutToast(effect, count, spoken));
         };
         Uploads.Configure(
             Settings.LexiconBaseUrl,
@@ -144,6 +149,21 @@ public sealed class SourceManager : IDisposable
         Correlator.Merged += OnFightMerged;
         // History views resync by polling Correlator.Version on the UI tick
         // — no event needed (the old HistoryChanged had zero subscribers).
+    }
+
+    /// <summary>The shown copy of a mass-detriment callout: one whole
+    /// dictionary sentence per control effect and per one/many, because the
+    /// effect word agrees with the count in some languages and sits on the
+    /// other side of it in others. An effect with no string of its own (a
+    /// control word added to Core without one) shows the spoken English
+    /// instead of a raw key. The key family is one pair per member of
+    /// <see cref="Vocabulary.ControlEffects"/>; LocalizationTests enumerates
+    /// it from that list.</summary>
+    internal static string CalloutToast(string effect, int count, string spoken)
+    {
+        var key = $"Callout_{effect}_{(count == 1 ? "One" : "Many")}";
+        var shown = Loc.Format(key, count);
+        return string.Equals(shown, key, StringComparison.Ordinal) ? spoken : shown;
     }
 
     // ── Fight consumers, each isolated ──────────────────────────────────────

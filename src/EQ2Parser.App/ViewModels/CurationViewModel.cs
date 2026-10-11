@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using EQ2Parser.App.Localization;
 using EQ2Parser.App.Services;
 using EQ2Parser.Core.Analysis;
 using EQ2Parser.Core.Triggers;
@@ -9,16 +10,29 @@ using EQ2Parser.Core.Triggers;
 namespace EQ2Parser.App.ViewModels;
 
 /// <summary>Mob header row in the curation list.</summary>
-public sealed record CurationMobRow(string Mob, int AbilityCount);
+public sealed record CurationMobRow(string Mob, int AbilityCount)
+{
+    public string AbilityCountLabel =>
+        Loc.Format(AbilityCount == 1 ? "Curation_AbilitiesOne" : "Curation_AbilitiesMany", AbilityCount);
+}
 
-/// <summary>One mined ability row with its measured stats.</summary>
+/// <summary>One mined ability row with its measured stats. The labels are
+/// interface text and come from the dictionaries; what the LOG named stays
+/// as the log spelled it — the ability, the damage schools and the control
+/// word, which is also the value a timer stores.</summary>
 public sealed partial class CurationAbilityRow(MinedAbility mined) : ObservableObject
 {
+    /// <summary>Between the parts of a label. Each part is a whole
+    /// dictionary string, so no language has to fit another's word order.</summary>
+    private const string PartSeparator = " · ";
+
     public MinedAbility Mined { get; } = mined;
     public string Ability => Mined.Ability;
 
-    public string CastsLabel =>
-        $"{Mined.Casts} cast{(Mined.Casts == 1 ? "" : "s")} / {Mined.Fights} fight{(Mined.Fights == 1 ? "" : "s")}";
+    public string CastsLabel => string.Join(
+        " / ",
+        Loc.Format(Mined.Casts == 1 ? "Curation_CastsOne" : "Curation_CastsMany", Mined.Casts),
+        Loc.Format(Mined.Fights == 1 ? "Curation_FightsOne" : "Curation_FightsMany", Mined.Fights));
 
     /// <summary>Swipe-adjusted base recast leads when recast debuffs were
     /// in play; the raw observed median stays visible beside it.</summary>
@@ -27,46 +41,55 @@ public sealed partial class CurationAbilityRow(MinedAbility mined) : ObservableO
         get
         {
             if (Mined.MedianIntervalSeconds is not { } median)
-                return "single cast";
+                return Loc.Get("Curation_RecastSingleCast");
             if (Mined.SwipeCoverage > 0.02 && Mined.BaseIntervalSeconds is { } baseline)
-                return $"~{baseline:0}s base  (raw {median:0}s · min {Mined.MinIntervalSeconds:0}s)";
-            return $"~{median:0}s  (min {Mined.MinIntervalSeconds:0}s)";
+                return Loc.Format("Curation_RecastBase", baseline, median, Mined.MinIntervalSeconds);
+            return Loc.Format("Curation_RecastPlain", median, Mined.MinIntervalSeconds);
         }
     }
 
     public string RecastToolTip =>
         Mined.SwipeCoverage > 0.02
-            ? $"Swipe-adjusted: {Mined.SwipeCoverage:P0} of interval time was under a recast debuff " +
-              $"(counted at 1/1.5 rate). Base ≈ {Mined.BaseIntervalSeconds:0.#}s — the right duration to store, " +
-              "because the live timer re-stretches automatically when the mob gets swiped."
-            : "No recast debuffs observed on this mob — raw and base agree.";
+            ? Loc.Format("Curation_RecastTipSwiped", Mined.SwipeCoverage, Mined.BaseIntervalSeconds)
+            : Loc.Get("Curation_RecastTipPlain");
 
     public string ProfileLabel
     {
         get
         {
-            var targets = Mined.AvgTargets >= 1.8 ? $" · AOE ×{Mined.AvgTargets:0.#}" : "";
-            var dot = Mined.TicksPerCast >= 1.8 ? $" · reapplies ×{Mined.TicksPerCast:0.#}" : "";
+            List<string> parts = [];
+            if (Mined.IsDetriment)
+            {
+                parts.Add(Loc.Get("Curation_ProfileDetriment"));
+            }
+            else
+            {
+                var perCast = Mined.Casts > 0 ? Mined.TotalDamage / Mined.Casts : 0;
+                parts.Add(Loc.Format("Curation_ProfilePerCast", CombatantRow.Compact(perCast)));
+                // The schools are the log's own words ("heat", "crushing").
+                parts.Add(Mined.DamageTypes is { Length: > 0 } types
+                    ? types
+                    : Mined.IsMelee ? Loc.Get("Curation_ProfileMelee") : Loc.Get("Curation_ProfileSpell"));
+            }
             // Correlated control kind, with measured duration when the
-            // release lines paired: "· stun ~4s". Canonical tooltip word
+            // release lines paired: "stun ~4s". Canonical tooltip word
             // when the log word maps; the raw flavour adjective otherwise
             // (informational here — only canonical words get STORED).
-            var kindWord = Vocabulary.CanonicalControlEffect(Mined.EffectKind) ?? Mined.EffectKind;
-            var effect = kindWord is { } kind2
-                ? Mined.EffectDurationSeconds is { } dur
-                    ? $" · {kind2} ~{dur:0.#}s"
-                    : $" · {kind2}"
-                : "";
+            if ((Vocabulary.CanonicalControlEffect(Mined.EffectKind) ?? Mined.EffectKind) is { } kind)
+            {
+                parts.Add(Mined.EffectDurationSeconds is { } dur
+                    ? Loc.Format("Curation_ProfileEffectTimed", kind, dur)
+                    : kind);
+            }
+            if (Mined.AvgTargets >= 1.8)
+                parts.Add(Loc.Format("Curation_ProfileAoe", Mined.AvgTargets));
+            if (Mined.TicksPerCast >= 1.8)
+                parts.Add(Loc.Format("Curation_ProfileReapplies", Mined.TicksPerCast));
             // The log named no caster for these — attributed to the fight's
             // subject, so the curator can sanity-check the assignment.
-            var inferred = Mined.SourceInferred ? " · source inferred" : "";
-            if (Mined.IsDetriment)
-                return $"detriment / control{effect}{targets}{dot}{inferred}";
-            var perCast = Mined.Casts > 0 ? Mined.TotalDamage / Mined.Casts : 0;
-            var kind = Mined.DamageTypes is { Length: > 0 } types
-                ? types
-                : Mined.IsMelee ? "melee" : "spell";
-            return $"{CombatantRow.Compact(perCast)}/cast · {kind}{effect}{targets}{dot}{inferred}";
+            if (Mined.SourceInferred)
+                parts.Add(Loc.Get("Curation_ProfileSourceInferred"));
+            return string.Join(PartSeparator, parts);
         }
     }
 
@@ -94,7 +117,8 @@ public sealed partial class CurationViewModel : ObservableObject
     /// <summary>Damage mode ranks by what hurts; detriment mode surfaces
     /// the zero-damage control effects (stifles, stuns, fears) that damage
     /// ranking buries — sorted by how often they land.</summary>
-    public IReadOnlyList<string> ModeChoices { get; } = ["Damage", "Detriments (CC)"];
+    public IReadOnlyList<string> ModeChoices { get; } =
+        [Loc.Get("Curation_ModeDamage"), Loc.Get("Curation_ModeDetriments")];
 
     [ObservableProperty]
     private int _modeIndex;
@@ -113,8 +137,8 @@ public sealed partial class CurationViewModel : ObservableObject
         foreach (var zone in manager.History.ArchivedZones())
             Zones.Add(zone);
         StatusLabel = Zones.Count == 0
-            ? "No archived boss fights yet — raid a little, then come back."
-            : "Pick a zone to mine its archived fights.";
+            ? Loc.Get("Curation_StatusNoArchive")
+            : Loc.Get("Curation_StatusPickZone");
     }
 
     partial void OnSelectedZoneChanged(string? value)
@@ -130,7 +154,7 @@ public sealed partial class CurationViewModel : ObservableObject
     /// dropped.</summary>
     private async Task MineAsync(string zone)
     {
-        StatusLabel = $"Mining {zone}…";
+        StatusLabel = Loc.Format("Curation_StatusMining", zone);
         var mined = await Task.Run(() => AbilityMiner.MineZone(_manager.History.EnumerateArchivedFights(zone), zone));
         if (SelectedZone != zone)
             return;
@@ -168,11 +192,20 @@ public sealed partial class CurationViewModel : ObservableObject
             }
         }
         StatusLabel = _mined.Count == 0
-            ? "No boss fights archived for this zone."
+            ? Loc.Get("Curation_StatusNoFightsInZone")
             : mobsShown == 0
-                ? (detriments ? "No control/detriment effects observed in this zone's fights." : "Nothing to show.")
-                : $"{mobsShown} mob{(mobsShown == 1 ? "" : "s")} · {abilities} abilit{(abilities == 1 ? "y" : "ies")} · {missing} timeable without a timer";
+                ? (detriments ? Loc.Get("Curation_StatusNoDetriments") : Loc.Get("Curation_StatusNothingToShow"))
+                : SummaryLabel(mobsShown, abilities, missing);
     }
+
+    /// <summary>The footer after a zone is mined: three counts, each a
+    /// whole dictionary string, joined — never one sentence assembled
+    /// around English plurals.</summary>
+    internal static string SummaryLabel(int mobs, int abilities, int missing) => string.Join(
+        " · ",
+        Loc.Format(mobs == 1 ? "Curation_MobsOne" : "Curation_MobsMany", mobs),
+        Loc.Format(abilities == 1 ? "Curation_AbilitiesOne" : "Curation_AbilitiesMany", abilities),
+        Loc.Format("Curation_TimeableWithoutTimer", missing));
 
     /// <summary>Exact identity — zone + mob + ability. A timer for MMIS's
     /// Mayong never marks ToNT's Vampire Lord version as covered. A
@@ -222,7 +255,7 @@ public sealed partial class CurationViewModel : ObservableObject
         var definition = BuildDefinition(row.Mined);
         _manager.SpellTimers.AddOrUpdate(definition);
         row.HasTimer = true;
-        StatusLabel = $"Timer created: {row.Ability} ({definition.DurationSeconds}s base) — it's on the Timers page.";
+        StatusLabel = Loc.Format("Curation_StatusTimerCreated", row.Ability, definition.DurationSeconds);
     }
 
     [RelayCommand]
@@ -231,7 +264,7 @@ public sealed partial class CurationViewModel : ObservableObject
         if (row is null)
             return;
         Clipboard.SetText(ActShareFormat.Export(BuildDefinition(row.Mined)));
-        StatusLabel = $"<Spell> XML for {row.Ability} copied — paste into the Lexicon encounter's ACT panel.";
+        StatusLabel = Loc.Format("Curation_StatusXmlCopied", row.Ability);
     }
 
     /// <summary>Every timeable, timer-less ability in the zone as one XML
@@ -247,10 +280,11 @@ public sealed partial class CurationViewModel : ObservableObject
         }
         if (lines.Count == 0)
         {
-            StatusLabel = "Nothing missing — every timeable ability already has a timer.";
+            StatusLabel = Loc.Get("Curation_StatusNothingMissing");
             return;
         }
         Clipboard.SetText(string.Join(Environment.NewLine, lines));
-        StatusLabel = $"{lines.Count} missing timer{(lines.Count == 1 ? "" : "s")} copied as XML.";
+        StatusLabel = Loc.Format(
+            lines.Count == 1 ? "Curation_StatusMissingCopiedOne" : "Curation_StatusMissingCopiedMany", lines.Count);
     }
 }

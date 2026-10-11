@@ -115,7 +115,7 @@ public sealed partial class OverlayConfigVm : ObservableObject
     public string ScaleLabel => $"{Scale:0.00}×";
     public string WidthLabel => $"{Width:0}px";
     public string MaxItemsLabel => MaxItems.ToString();
-    public string ToastSecondsLabel => $"{ToastSeconds:0}s";
+    public string ToastSecondsLabel => Loc.Format("Overlays_ToastSecondsLabel", ToastSeconds);
 
     partial void OnVisibleChanged(bool value)
     {

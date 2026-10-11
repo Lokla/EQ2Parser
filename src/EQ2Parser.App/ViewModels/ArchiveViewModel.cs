@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.Windows.Media;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using EQ2Parser.App.Localization;
 using EQ2Parser.App.Services;
 using EQ2Parser.Core.Combat;
 using EQ2Parser.Core.History;
@@ -17,10 +18,23 @@ public sealed partial class ArchiveRow(EncounterSummary summary, bool loaded) : 
     public string Zone => Summary.Zone;
     public string Title => Summary.Title;
 
-    public string DetailLabel =>
-        $"{TimeSpan.FromSeconds(Math.Max(0, Summary.DurationSeconds)):m\\:ss}  ·  " +
-        $"{CombatantRow.Compact(Summary.Damage)} dmg  ·  {Summary.Owner}'s log" +
-        (Summary.IsBoss ? "" : "  ·  trash");
+    /// <summary>Duration, damage and whose log it came from, plus a
+    /// marker on trash. Each part is a whole dictionary string.</summary>
+    public string DetailLabel
+    {
+        get
+        {
+            List<string> parts =
+            [
+                $"{TimeSpan.FromSeconds(Math.Max(0, Summary.DurationSeconds)):m\\:ss}",
+                Loc.Format("Archive_DetailDamage", CombatantRow.Compact(Summary.Damage)),
+                Loc.Format("Archive_DetailLog", Summary.Owner),
+            ];
+            if (!Summary.IsBoss)
+                parts.Add(Loc.Get("Archive_DetailTrash"));
+            return string.Join("  ·  ", parts);
+        }
+    }
 
     public Brush OutcomeBrush => Summary.Success switch
     {
@@ -43,8 +57,15 @@ public sealed partial class ArchiveViewModel : ObservableObject
 
     public ObservableCollection<ArchiveRow> Rows { get; } = [];
 
+    /// <summary>In step with <see cref="RangeDays"/>, entry for entry.</summary>
     public IReadOnlyList<string> RangeChoices { get; } =
-        ["Last 7 days", "Last 30 days", "Last 3 months", "Last year", "Everything"];
+    [
+        Loc.Get("Archive_RangeWeek"),
+        Loc.Get("Archive_RangeMonth"),
+        Loc.Get("Archive_RangeQuarter"),
+        Loc.Get("Archive_RangeYear"),
+        Loc.Get("Archive_RangeAll"),
+    ];
 
     private static readonly int?[] RangeDays = [7, 30, 90, 365, null];
 
@@ -76,10 +97,18 @@ public sealed partial class ArchiveViewModel : ObservableObject
         foreach (var summary in results)
             Rows.Add(new ArchiveRow(summary, _manager.History.IsLoaded(summary.Id)));
         var bosses = results.Count(s => s.IsBoss);
-        ResultLabel = results.Count == 0
-            ? "Nothing found."
-            : $"{results.Count} fight{(results.Count == 1 ? "" : "s")} · {bosses} boss{(bosses == 1 ? "" : "es")}";
+        ResultLabel = ResultLabelFor(results.Count, bosses);
     }
+
+    /// <summary>The line under the search box: how many fights matched
+    /// and how many of them are bosses — two whole strings, joined.</summary>
+    internal static string ResultLabelFor(int fights, int bosses) =>
+        fights == 0
+            ? Loc.Get("Archive_NothingFound")
+            : string.Join(
+                " · ",
+                Loc.Format(fights == 1 ? "Archive_FightsOne" : "Archive_FightsMany", fights),
+                Loc.Format(bosses == 1 ? "Archive_BossesOne" : "Archive_BossesMany", bosses));
 
     [RelayCommand]
     private void LoadRow(ArchiveRow? row)

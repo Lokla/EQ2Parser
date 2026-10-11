@@ -57,7 +57,7 @@
                                 <TextBlock Text="{Binding Mob}" FontSize="13"
                                            FontFamily="{StaticResource BodySemiBoldFont}"
                                            Foreground="{StaticResource GoldBrightBrush}" />
-                                <TextBlock Text="{Binding AbilityCount, StringFormat={}{0} abilities}"
+                                <TextBlock Text="{Binding AbilityCountLabel}"
                                            Style="{StaticResource MutedText}" FontSize="11" Margin="10,1,0,0" />
                             </StackPanel>
                         </Border>
