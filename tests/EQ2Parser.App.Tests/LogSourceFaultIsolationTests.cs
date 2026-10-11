@@ -219,7 +219,9 @@ public sealed class LogSourceFaultIsolationTests : IDisposable
         using var source = Source();
 
         source.Start();
-        await WaitFor(() => source.Processor.LinesSeen >= 4);
+        // Matched, not seen: LinesSeen ticks at the START of a line, so
+        // waiting on it can return while the last line is still mid-flight.
+        await WaitFor(() => source.Processor.LinesMatched >= 3);
 
         Assert.Null(source.Error);
         Assert.Equal(1, source.SkippedLines);

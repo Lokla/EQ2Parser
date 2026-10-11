@@ -169,9 +169,12 @@ public sealed class LogSource : IDisposable
             // The READER failed (IO error mid-read, file on a drive that
             // went away): nothing to skip past, the tail is over. Same
             // outcome as before — but no longer a silent one.
-            Error = ex;
+            // Evidence first, Error last: Error is what other threads (the
+            // Sources page, tests) watch, so by the time anyone can see the
+            // source has stopped, the report and the journal line exist.
             CrashLog.Report("log-reader", ex, $"Log source: {FileName}", always: true);
             SessionJournal.Mark($"source STOPPED: {FileName} — the log reader failed ({ex.GetType().Name})");
+            Error = ex;
         }
     }
 
@@ -232,12 +235,14 @@ public sealed class LogSource : IDisposable
 
         var stopped = new InvalidOperationException(
             $"stopped after {outcome.Consecutive} lines in a row failed to process — last: {ex.GetType().Name}: {ex.Message}", ex);
-        Error = stopped;
         // Once per source, so it bypasses the rate limit — the line report
         // a moment ago would otherwise swallow the source's last words.
         CrashLog.Report("log-source-stopped", stopped, LineContext(raw, outcome.Skipped), always: true);
         SessionJournal.Mark(
             $"source STOPPED: {FileName} — {outcome.Consecutive} lines in a row failed ({ex.GetType().Name}, {outcome.Skipped} skipped this session)");
+        // Set last, for the same reason as the reader failure in PumpAsync:
+        // whoever sees Error finds the evidence already written.
+        Error = stopped;
         return false;
     }
 
