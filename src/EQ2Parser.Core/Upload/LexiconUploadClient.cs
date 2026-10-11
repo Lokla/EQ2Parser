@@ -6,7 +6,18 @@ using System.Text.Json;
 
 namespace EQ2Parser.Core.Upload;
 
-public sealed record UploadResult(bool Success, int StatusCode, string Message, string Body = "");
+/// <param name="Success">2xx.</param>
+/// <param name="StatusCode">HTTP status; 0 when no response arrived
+/// (network error, timeout).</param>
+/// <param name="Message">User-facing line: the server's status on success,
+/// its <c>detail</c> on failure.</param>
+/// <param name="Body">Raw response body.</param>
+/// <param name="RejectCode">Value of the
+/// <see cref="LexiconUploadClient.RejectHeader"/> response header on a failed
+/// signed upload, trimmed; "" when the header is absent or blank. A
+/// machine code for the queue's pause decision — never shown to the user
+/// (the <c>detail</c> in <paramref name="Message"/> is the human text).</param>
+public sealed record UploadResult(bool Success, int StatusCode, string Message, string Body = "", string RejectCode = "");
 
 /// <summary>
 /// HTTP client for the EQ2Lexicon site — the exact transport contract the
@@ -20,6 +31,29 @@ public sealed record UploadResult(bool Success, int StatusCode, string Message, 
 public sealed class LexiconUploadClient : IDisposable
 {
     public const string SignatureHeader = "X-Lexicon-Signature";
+
+    /// <summary>Response header the site sets on a refusal that is about
+    /// THIS upload and not about the caller's credentials — a different
+    /// upload with the same token could still succeed. Mirrors
+    /// <c>REJECT_HEADER</c> in EQ2Lexicon's
+    /// <c>backend/server/api/parses/ingest.py</c>; change both together.
+    /// Its value is a short lowercase machine code. The site may add codes
+    /// at any time, so the rule in <see cref="UploadQueue"/> is "a 403 with
+    /// any non-empty value does not pause", never a list of known codes: a
+    /// 403 WITHOUT the header is what an older server sends for everything
+    /// and what a current one sends for an account-level refusal (an
+    /// unapproved account), and that still pauses.</summary>
+    public const string RejectHeader = "X-Lexicon-Reject";
+
+    /// <summary>The one reject code the client reads for more than "do not
+    /// pause": the upload's <c>logger_server</c> is not on the site's allow
+    /// list (<c>ingest_parse</c> in the same server module). Every later
+    /// fight from that log folder would be refused the same way, so the
+    /// queue stops sending for that server for the session instead of
+    /// spending the token's per-minute upload budget on them. An unknown
+    /// code gets the generic treatment — nothing breaks when the site adds
+    /// one.</summary>
+    public const string RejectServerNotAllowed = "server-not-allowed";
 
     private readonly HttpClient _http;
 
@@ -92,7 +126,14 @@ public sealed class LexiconUploadClient : IDisposable
             using var response = await _http.SendAsync(request, ct).ConfigureAwait(false);
             var body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode)
-                return new UploadResult(false, (int)response.StatusCode, ExtractDetail(body) ?? $"Server responded {(int)response.StatusCode}", body);
+            {
+                return new UploadResult(
+                    false,
+                    (int)response.StatusCode,
+                    ExtractDetail(body) ?? $"Server responded {(int)response.StatusCode}",
+                    body,
+                    ReadRejectCode(response));
+            }
             var status = ExtractField(body, "status") ?? "ok";
             return new UploadResult(true, (int)response.StatusCode, $"Uploaded ({status}).", body);
         }
@@ -177,6 +218,15 @@ public sealed class LexiconUploadClient : IDisposable
             return false;
         }
     }
+
+    /// <summary>The <see cref="RejectHeader"/> value, trimmed; "" when the
+    /// header is absent or carries only whitespace (a blank value says
+    /// nothing, so it reads as absent and the queue's cautious branch —
+    /// pause — applies).</summary>
+    private static string ReadRejectCode(HttpResponseMessage response) =>
+        response.Headers.TryGetValues(RejectHeader, out var values)
+            ? values.Select(v => v.Trim()).FirstOrDefault(v => v.Length > 0) ?? ""
+            : "";
 
     private static string? ExtractDetail(string body) => ExtractField(body, "detail");
 

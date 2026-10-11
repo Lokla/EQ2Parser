@@ -1,3 +1,4 @@
+using System.Net.Http;
 using EQ2Parser.App.Localization;
 using EQ2Parser.Core.Combat;
 using EQ2Parser.Core.Upload;
@@ -29,6 +30,21 @@ public sealed class UploadService : IDisposable
 
     /// <summary>Fights skipped this session by the raid-only rule.</summary>
     public int SkippedNonRaid { get; private set; }
+
+    /// <summary>Fights skipped this session by the auto path because their
+    /// log is not inside a logs/&lt;server&gt;/ folder — there is no server to
+    /// put on the upload, and the site refuses one without it.</summary>
+    public int SkippedNoServer { get; private set; }
+
+    /// <summary>Fights the queue did not send this session because the site
+    /// had already refused their server as not on its allow list — see
+    /// <see cref="UploadQueue.SkippedRefusedServer"/>.</summary>
+    public int SkippedRefusedServer => _queue.SkippedRefusedServer;
+
+    /// <summary>Test seam: the handler behind each client
+    /// <see cref="Configure"/> builds (one per call — a client disposes its
+    /// handler). Null in the app = the real network stack.</summary>
+    internal Func<HttpMessageHandler>? HandlerFactory { get; init; }
 
     public UploadService()
     {
@@ -90,8 +106,14 @@ public sealed class UploadService : IDisposable
             Set(problem);
             return;
         }
-        _client = new LexiconUploadClient(baseUrl, apiToken);
+        _client = new LexiconUploadClient(baseUrl, apiToken, HandlerFactory?.Invoke());
         _queue.ResetAuthPause();
+        // A "server not allowed" answer belongs to the site and account it
+        // came from. Configure cannot tell a changed token or URL from a
+        // flipped toggle (it never keeps the token to compare), so every
+        // reconfigure forgets — the cost of forgetting too often is one
+        // refused request per such server, then the skip resumes.
+        _queue.ForgetRefusedServers();
         // Raid-tab entitlement check — regardless of the auto-upload toggle
         // (the tab's local features don't need uploads on).
         _lastAccessProbe = DateTimeOffset.Now;
@@ -183,15 +205,9 @@ public sealed class UploadService : IDisposable
         var source = manager.Sources.Count > 0 ? manager.Sources[0] : null;
         if (source is null)
             return;
+        if (BuildAttendancePayload(source.Owner, source.Path, now, snapshot) is not { } payload)
+            return; // no server folder — see BuildAttendancePayload; stays quiet like every attendance failure
         _lastAttendanceSend = now;
-        var payload = new AttendancePayload
-        {
-            LoggerName = source.Owner,
-            LoggerServer = Core.Upload.LogPaths.ParseServerName(source.Path),
-            SentAt = now.ToUnixTimeSeconds(),
-            RaidMembers = [.. snapshot.Where(m => m.InRaid).Select(ToMember)],
-            OnlineGuildies = [.. snapshot.Where(m => m is { InRaid: false, Online: true }).Select(ToMember)],
-        };
         _ = Task.Run(() => client.UploadAttendanceAsync(payload));
         _ = Task.Run(async () =>
         {
@@ -199,6 +215,29 @@ public sealed class UploadService : IDisposable
             if (await client.FetchRaidMainsAsync(payload.LoggerName, payload.LoggerServer).ConfigureAwait(false) is { } mains)
                 RaidMains = mains;
         });
+    }
+
+    /// <summary>The snapshot payload for one tick, or null when the logger's
+    /// log is not inside a logs/&lt;server&gt;/ folder
+    /// (<see cref="LogPaths.ParseServerName"/> == ""). Both requests the
+    /// tick makes need the server — the attendance ingest and the raid-mains
+    /// lookup each answer 400 without one — so there is nothing to send, and
+    /// the tick must not spend its five-minute slot on a request that can
+    /// only be refused.</summary>
+    internal static AttendancePayload? BuildAttendancePayload(
+        string owner, string logPath, DateTimeOffset now, IReadOnlyList<Core.Raid.RaidMemberState> snapshot)
+    {
+        var server = LogPaths.ParseServerName(logPath);
+        if (server.Length == 0)
+            return null;
+        return new AttendancePayload
+        {
+            LoggerName = owner,
+            LoggerServer = server,
+            SentAt = now.ToUnixTimeSeconds(),
+            RaidMembers = [.. snapshot.Where(m => m.InRaid).Select(ToMember)],
+            OnlineGuildies = [.. snapshot.Where(m => m is { InRaid: false, Online: true }).Select(ToMember)],
+        };
     }
 
     private static AttendanceMember ToMember(Core.Raid.RaidMemberState m) => new()
@@ -215,15 +254,30 @@ public sealed class UploadService : IDisposable
         _queue.Enqueue(encounter, LogPaths.ParseServerName(encounter.SourceId));
     }
 
-    /// <summary>The auto-upload gate: on + configured, and (when raid-only
-    /// is set) a raid fight per <see cref="RaidUploadFilter"/>. A skipped
-    /// fight is counted and named in the status line so an empty parses
-    /// page is explainable from the Settings card. Pump thread, under the
-    /// sync lock — the classifier walk is the same cost attendance pays.</summary>
+    /// <summary>The auto-upload gate: on + configured, the log sits in a
+    /// server folder, and (when raid-only is set) a raid fight per
+    /// <see cref="RaidUploadFilter"/>. A skipped fight is counted and named
+    /// in the status line so an empty parses page is explainable from the
+    /// Settings card. Pump thread, under the sync lock — the classifier
+    /// walk is the same cost attendance pays.</summary>
     internal bool ShouldAutoUpload(Encounter encounter)
     {
         if (!Active)
             return false;
+        // A log read straight from <install>/logs/ (the legacy layout) has
+        // no server folder, so logger_server would be "" — and the site
+        // answers 400 to that, every time: it has no default world. Sending
+        // would be one doomed request per fight, so skip and say what to
+        // fix. Checked before the raid-only rule: with no server NOTHING
+        // from this log can upload, and that is the reason worth showing.
+        // A placeholder-titled fight is never uploaded anyway (Enqueue
+        // drops it), so it is not counted as skipped for this either.
+        if (encounter.Title != Encounter.PlaceholderTitle && LogPaths.ParseServerName(encounter.SourceId).Length == 0)
+        {
+            SkippedNoServer++;
+            Set(Loc.Format("UploadSvc_NoServerFolder", encounter.Title));
+            return false;
+        }
         if (!_raidOnly || encounter.Title == Encounter.PlaceholderTitle)
             return true;
         var players = PlayerCounter?.Invoke(encounter) ?? 0;
@@ -237,8 +291,12 @@ public sealed class UploadService : IDisposable
     /// <summary>Fight-tree manual upload: every source's view of the fight,
     /// exactly what auto-upload would have sent (the site mirror-groups them
     /// and keeps the longest as primary). Works with the auto toggle off —
-    /// right-clicking Upload IS the consent — and clears a bad-token pause,
-    /// since the explicit action is the retry.</summary>
+    /// right-clicking Upload IS the consent — and clears a bad-token pause
+    /// (and the refused-server memory), since the explicit action is the
+    /// retry. A source whose log is not in a server folder is refused HERE
+    /// with the reason: consent does not make the request able to succeed
+    /// (the site answers 400 without a server). When that leaves nothing to
+    /// send, nothing is retried, so a pause is left exactly as it was.</summary>
     public void UploadFight(IReadOnlyList<Encounter> sources)
     {
         if (!Configured)
@@ -246,11 +304,26 @@ public sealed class UploadService : IDisposable
             Set(Loc.Get("UploadSvc_AddTokenInSettings"));
             return;
         }
+        List<(Encounter Encounter, string Server)> sendable = new(sources.Count);
+        string? noServerTitle = null;
+        foreach (var encounter in sources)
+        {
+            var server = LogPaths.ParseServerName(encounter.SourceId);
+            if (server.Length == 0)
+                noServerTitle ??= encounter.Title;
+            else
+                sendable.Add((encounter, server));
+        }
+        if (noServerTitle is not null)
+            Set(Loc.Format("UploadSvc_NoServerFolder", noServerTitle));
+        if (sendable.Count == 0)
+            return;
         _queue.ResetAuthPause();
+        _queue.ForgetRefusedServers();
         // No provenance on manual uploads: the fight may have ended long
         // ago, and probing the log NOW says nothing about who wrote it THEN.
-        foreach (var encounter in sources)
-            _queue.Enqueue(encounter, LogPaths.ParseServerName(encounter.SourceId), withProvenance: false);
+        foreach (var (encounter, server) in sendable)
+            _queue.Enqueue(encounter, server, withProvenance: false);
     }
 
     /// <summary>Settings "Test" button — verifies the token against

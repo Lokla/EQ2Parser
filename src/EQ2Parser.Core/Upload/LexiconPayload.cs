@@ -96,6 +96,10 @@ public sealed record PayloadDamageType
     [JsonPropertyName("swings")] public int Swings { get; init; }
 }
 
+/// <summary>One ability's row for one attacker in ONE swing category — the
+/// site's uniqueness key is (attacker, swingtype, type), and its
+/// per-combatant tabs pick rows by <see cref="SwingType"/>, so an ability
+/// that logs in two categories is two rows.</summary>
 public sealed record PayloadAttackType
 {
     [JsonPropertyName("attacker")] public required string Attacker { get; init; }
@@ -117,6 +121,18 @@ public sealed record PayloadAttackType
     [JsonPropertyName("median")] public long Median { get; init; }
     [JsonPropertyName("minhit")] public long MinHit { get; init; }
     [JsonPropertyName("maxhit")] public long MaxHit { get; init; }
+
+    /// <summary>ACT's type text for the row, which the site stores as sent
+    /// (<c>IngestAttackType.resist</c>, nullable) and shows per tab: the
+    /// heal type on the Healed tab — "Hitpoints", or "Absorption", the
+    /// exact value that marks a ward — and the kind on the Threat tab
+    /// ("Increase" / "Decrease"). Power replenish carries "Power" and a
+    /// damage row its damage type; the site's pages read neither, its
+    /// export API passes the damage type through. Null = omitted from the
+    /// JSON, which is what a row gets when its swings do not share one
+    /// value (see PayloadBuilder).</summary>
+    [JsonPropertyName("resist")] public string? Resist { get; init; }
+
     [JsonPropertyName("hits")] public int Hits { get; init; }
     [JsonPropertyName("crithits")] public int CritHits { get; init; }
     [JsonPropertyName("blocked")] public int Blocked { get; init; }

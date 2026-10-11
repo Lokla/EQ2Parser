@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using EQ2Parser.Core.Combat;
+using EQ2Parser.Core.Grammar;
 
 namespace EQ2Parser.Core.Upload;
 
@@ -96,33 +97,20 @@ public static class PayloadBuilder
             // bucket shipped duplicates (a melee swing feeds Outgoing Damage
             // AND Auto-Attack (Out)) and tripped the site's
             // UNIQUE(combatant_id, swing_type, attack_name) with a 500.
+            // That bucket is keyed by ability NAME alone, so each ability
+            // is split by swing category here: one row per (name, category)
+            // — the site's key, and what ACT and its plugin send.
             if (combatant.OutgoingBuckets.GetValueOrDefault(BucketConfig.AllOutgoingRef) is { } reference)
             {
                 foreach (var (abilityName, ability) in reference.Abilities)
                 {
-                    if (abilityName == Bucket.AllAbility || ability.Swings.Count == 0)
+                    if (abilityName == Bucket.AllAbility)
                         continue;
-                    attackTypes.Add(new PayloadAttackType
+                    foreach (var (category, stats) in SplitByCategory(ability))
                     {
-                        Attacker = combatant.Name,
-                        Type = abilityName,
-                        SwingType = (int)ability.Swings[0].Category,
-                        Damage = ability.Damage,
-                        EncDps = Rate(ability.Damage, encounterSeconds),
-                        // ACT's per-attacktype DPS: damage over the type's own
-                        // first-to-last-swing window, min 1 s (a single-swing
-                        // window is 0 s and would divide away the damage).
-                        Dps = Rate(ability.Damage, Math.Max(1, (ability.EndTime - ability.StartTime).TotalSeconds)),
-                        CritPerc = ability.Hits > 0 ? Math.Round(100.0 * ability.CritHits / ability.Hits, 1) : 0,
-                        Median = ability.Median,
-                        MinHit = ability.MinHit,
-                        MaxHit = ability.MaxHit,
-                        Hits = ability.Hits,
-                        CritHits = ability.CritHits,
-                        Blocked = ability.Avoids,
-                        Misses = ability.Misses,
-                        Swings = ability.SwingCount,
-                    });
+                        if (AttackRow(combatant.Name, category, stats, encounterSeconds) is { } row)
+                            attackTypes.Add(row);
+                    }
                 }
             }
         }
@@ -153,6 +141,161 @@ public static class PayloadBuilder
             AttackTypes = attackTypes,
             ClientWarnings = clientWarnings is { Count: > 0 } ? [.. clientWarnings] : null,
         };
+    }
+
+    /// <summary>One <see cref="AbilityStats"/> per swing category the
+    /// ability logged in, in order of first appearance. An ability that
+    /// damages and heals, or carries a threat component, logs under one
+    /// name in several categories; filed as one row under its first
+    /// swing's category it put heal and threat amounts on the site's
+    /// Damage tab (or took the damage off it). Status-effect swings are
+    /// left out — see <see cref="IsUploaded"/>.
+    ///
+    /// The figures are never re-derived here: a single-category ability
+    /// (nearly all of them) is the reference bucket's own stats object, and
+    /// a split one is the same <see cref="AbilityStats"/> class fed only
+    /// that category's swings, under the same name. Median, hit, crit, miss
+    /// and blocked counting therefore cannot drift from the combat
+    /// model's.</summary>
+    private static List<(SwingCategory Category, AbilityStats Stats)> SplitByCategory(AbilityStats ability)
+    {
+        List<(SwingCategory Category, AbilityStats Stats)> rows = [];
+        var swings = ability.Swings;
+        if (swings.Count == 0)
+            return rows;
+
+        var first = swings[0].Category;
+        var single = true;
+        foreach (var swing in swings)
+        {
+            if (swing.Category != first)
+            {
+                single = false;
+                break;
+            }
+        }
+        if (single && first != SwingCategory.CureDispel)
+        {
+            if (IsUploaded(first))
+                rows.Add((first, ability));
+            return rows;
+        }
+
+        foreach (var swing in swings)
+        {
+            if (!IsUploaded(swing.Category))
+                continue;
+            AbilityStats? stats = null;
+            foreach (var (category, existing) in rows)
+            {
+                if (category == swing.Category)
+                {
+                    stats = existing;
+                    break;
+                }
+            }
+            if (stats is null)
+                rows.Add((swing.Category, stats = new AbilityStats(ability.Name)));
+            stats.Add(swing.Category == SwingCategory.CureDispel ? AsOneEffectRemoved(swing) : swing);
+        }
+        return rows;
+    }
+
+    /// <summary>Category 30 is the parser's own (control-effect apply and
+    /// release lines, amount 0, attacker almost always "Unknown"). No reader
+    /// on the site selects it, so its rows only grew the site's largest
+    /// table. It stays in the encounter for local history and ability
+    /// mining. Every other category is ACT's and is uploaded — 13 (power
+    /// replenish) and 16 (threat) included.</summary>
+    private static bool IsUploaded(SwingCategory category) => category != SwingCategory.StatusEffect;
+
+    /// <summary>The site's Cures tab reads a cure row's damage as the number
+    /// of effects removed, hits as times cast and maxhit as the most at
+    /// once, and ACT books each cure line as an amount of 1. The engine's
+    /// cure swing carries 0 (a cure has no amount), so the row uploaded as
+    /// all zeroes. The amount is set on a COPY for the payload row only —
+    /// the encounter's swing, the Cure/Dispel bucket and its damage_types
+    /// row keep 0.</summary>
+    private static Swing AsOneEffectRemoved(Swing cure) =>
+        cure.Damage.Number == DamageValue.NoDamageNumber ? cure with { Damage = OneEffect } : cure;
+
+    private static readonly DamageValue OneEffect = new(1);
+
+    /// <summary>The row for one ability in one category, or null when it
+    /// recorded no activity: the ACT plugin's rule (no damage, no hits, no
+    /// misses, nothing blocked). In practice that is the "Killing"
+    /// bookkeeping row — death-coded swings only — which sat on the site's
+    /// Damage tab as a row of zeroes; kills and deaths reach the site as
+    /// combatant columns. An ability that only ever missed, was only ever
+    /// avoided, or landed for no damage keeps its row.</summary>
+    private static PayloadAttackType? AttackRow(
+        string attacker, SwingCategory category, AbilityStats stats, double encounterSeconds)
+    {
+        if (stats.Damage == 0 && stats.Hits == 0 && stats.Misses == 0 && stats.Avoids == 0)
+            return null;
+        return new PayloadAttackType
+        {
+            Attacker = attacker,
+            Type = stats.Name,
+            SwingType = (int)category,
+            Damage = stats.Damage,
+            EncDps = Rate(stats.Damage, encounterSeconds),
+            // ACT's per-attacktype DPS: damage over the type's own
+            // first-to-last-swing window, min 1 s (a single-swing
+            // window is 0 s and would divide away the damage).
+            Dps = Rate(stats.Damage, Math.Max(1, (stats.EndTime - stats.StartTime).TotalSeconds)),
+            CritPerc = stats.Hits > 0 ? Math.Round(100.0 * stats.CritHits / stats.Hits, 1) : 0,
+            Median = stats.Median,
+            MinHit = stats.MinHit,
+            MaxHit = stats.MaxHit,
+            Resist = ResistOf(category, stats.Swings),
+            Hits = stats.Hits,
+            CritHits = stats.CritHits,
+            Blocked = stats.Avoids,
+            Misses = stats.Misses,
+            Swings = stats.SwingCount,
+        };
+    }
+
+    /// <summary>The grammar's damage-type marker on a threat REDUCTION
+    /// ("… reduces THEIR hate with …"); an increase carries "threat". The
+    /// amount is positive either way, so this marker is the only thing
+    /// that tells the two apart.</summary>
+    private const string ThreatReduceType = "threat-reduce";
+
+    /// <summary>ACT's type text for a row (the wire's <c>resist</c>), or
+    /// null when the row's swings do not agree on one. The site keys one
+    /// row per (attacker, swingtype, name), so a heal ability that also
+    /// warded under the same name is ONE row whose amount mixes both:
+    /// "Hitpoints" would mislabel the absorbed part and "Absorption" would
+    /// mark the whole row as a ward, so it claims neither and the site
+    /// shows a dash. Same rule for a name that both raised and lowered
+    /// threat, and for a damage row whose landed hits span damage types
+    /// (dual wield, an infused weapon). Avoids, no-damage hits and the kill
+    /// marker never name a damage type — the parser files those under its
+    /// own markers — so only swings that dealt damage are consulted.</summary>
+    private static string? ResistOf(SwingCategory category, IReadOnlyList<Swing> swings)
+    {
+        string? shared = null;
+        foreach (var swing in swings)
+        {
+            var text = category switch
+            {
+                SwingCategory.Healing => swing.DamageType == EnglishGrammar.WardAbsorbType ? "Absorption" : "Hitpoints",
+                SwingCategory.Threat => swing.DamageType == ThreatReduceType ? "Decrease" : "Increase",
+                SwingCategory.PowerReplenish => "Power",
+                SwingCategory.Melee or SwingCategory.NonMelee =>
+                    swing.Damage.Number > 0 && swing.DamageType.Length > 0 ? swing.DamageType : null,
+                _ => null,
+            };
+            if (text is null)
+                continue;
+            if (shared is null)
+                shared = text;
+            else if (!string.Equals(shared, text, StringComparison.OrdinalIgnoreCase))
+                return null;
+        }
+        return shared;
     }
 
     /// <summary>Stable 8-hex content id: same fight → same id → server-side

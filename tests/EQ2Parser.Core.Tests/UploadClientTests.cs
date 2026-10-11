@@ -74,6 +74,21 @@ public class UploadClientTests
         Assert.InRange(at.GetProperty("critperc").GetDouble(), 0, 100);
         Assert.True(dt.GetProperty("dps").GetDouble() > 0);
         Assert.InRange(dt.GetProperty("critperc").GetDouble(), 0, 100);
+
+        // resist: the server's IngestAttackType key (str | None) behind the
+        // site's heal-type and threat-kind columns. Every attack-row key is
+        // one that model declares (an undeclared key would be accepted and
+        // dropped, so a 201 proves nothing).
+        Assert.Equal("divine", at.GetProperty("resist").GetString());
+        Assert.Equal(
+            [
+                "attacker", "type", "swingtype", "damage", "encdps", "dps", "critperc", "median",
+                "minhit", "maxhit", "resist", "hits", "crithits", "blocked", "misses", "swings",
+            ],
+            at.EnumerateObject().Select(p => p.Name));
+        // A row with nothing to say omits the key — never "resist":null.
+        foreach (var row in root.GetProperty("attack_types").EnumerateArray())
+            Assert.All(row.EnumerateObject(), p => Assert.NotEqual(JsonValueKind.Null, p.Value.ValueKind));
     }
 
     [Fact]
@@ -211,5 +226,64 @@ public class UploadClientTests
         Assert.False(result.Success);
         Assert.Equal(401, result.StatusCode);
         Assert.Equal("Invalid or expired token.", result.Message);
+    }
+
+    [Fact]
+    public void Reject_Header_Name_Matches_The_Server_Constant()
+    {
+        // Pinned like the HMAC vector: the string is the contract. It must
+        // equal REJECT_HEADER in EQ2Lexicon's backend/server/api/parses/ingest.py
+        // — a typo on either side silently turns every per-upload refusal
+        // back into a queue-wide pause.
+        Assert.Equal("X-Lexicon-Reject", LexiconUploadClient.RejectHeader);
+        Assert.Equal("server-not-allowed", LexiconUploadClient.RejectServerNotAllowed);
+    }
+
+    /// <summary>Answers 403 with a detail body and, when given, the reject
+    /// header set to exactly the supplied value.</summary>
+    private sealed class RefusingHandler(string? rejectHeaderValue) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.Forbidden)
+            {
+                Content = new StringContent("""{"detail":"Server 'Kaladim' is not on the allowed list."}""", Encoding.UTF8, "application/json"),
+            };
+            if (rejectHeaderValue is not null)
+                response.Headers.TryAddWithoutValidation(LexiconUploadClient.RejectHeader, rejectHeaderValue);
+            return Task.FromResult(response);
+        }
+    }
+
+    [Theory]
+    [InlineData("server-not-allowed", "server-not-allowed")]
+    [InlineData("  some-future-code ", "some-future-code")] // any code passes through, trimmed — codes are not enumerated
+    [InlineData(null, "")] //                                  older server, or an account-level refusal
+    [InlineData("", "")] //                                    present but blank says nothing — reads as absent
+    [InlineData("   ", "")]
+    public async Task Upload_Carries_The_Reject_Code_From_The_Response_Header(string? header, string expected)
+    {
+        using var client = new LexiconUploadClient("https://parses.example.com", "eq2c_test_token", new RefusingHandler(header));
+
+        var result = await client.UploadAsync(PayloadBuilder.Build(BuildEncounter(), "Kaladim"));
+
+        Assert.False(result.Success);
+        Assert.Equal(403, result.StatusCode);
+        Assert.Equal(expected, result.RejectCode);
+        // The human text is still the server's detail, header or not.
+        Assert.Equal("Server 'Kaladim' is not on the allowed list.", result.Message);
+    }
+
+    [Fact]
+    public async Task Attendance_Upload_Reads_The_Reject_Code_Too()
+    {
+        // Same signed POST, same header: the site marks its attendance
+        // refusals (server not tracked, no claim, no guild) the same way.
+        using var client = new LexiconUploadClient("https://parses.example.com", "eq2c_test_token", new RefusingHandler("no-guild"));
+
+        var result = await client.UploadAttendanceAsync(new AttendancePayload { LoggerName = "Menludiir", LoggerServer = "Varsoon" });
+
+        Assert.Equal(403, result.StatusCode);
+        Assert.Equal("no-guild", result.RejectCode);
     }
 }

@@ -12,9 +12,16 @@ public static class LogPaths
     /// EQ2 server name from a log path — the log's parent directory name.
     /// Returns "" when the path doesn't match the per-server layout — the
     /// legacy generic log at &lt;install&gt;/logs/eq2log.txt has parent "logs",
-    /// not a server — and the site then falls back to its configured
-    /// default world. Server names with spaces ("Antonia Bayle") pass
-    /// through unmodified.
+    /// not a server. "" means UNKNOWN, and nothing downstream can fill it
+    /// in: the site has no default world to fall back to. Its parse ingest
+    /// answers 400 ("logger_server is required") to an empty value, and the
+    /// attendance ingest and raid-mains routes answer 400 as well, so a
+    /// caller must not send a request for such a log at all — UploadService
+    /// skips the fight and tells the user why, and UploadQueue.Enqueue drops
+    /// an empty server as the backstop. Server names with spaces
+    /// ("Antonia Bayle") pass through unmodified. A log in any other folder
+    /// yields that folder's name, whatever it is; the site's allow-list
+    /// decides whether that is a server it accepts.
     /// </summary>
     public static string ParseServerName(string? logPath)
     {
