@@ -63,4 +63,4 @@ User-facing strings go through `Loc` with keys in `src/EQ2Parser.App/Localizatio
 
 ## Releases
 
-Maintainer-driven: `scripts/release.ps1` or the release workflow publish a Velopack package to [EQ2Parser-releases](https://github.com/VortexUK/EQ2Parser-releases). Contributors never need to touch this.
+Maintainer-driven: pushing a tag `vX.Y.Z` runs the release workflow, which tests, packs with Velopack and publishes a GitHub release on this repo (the feed the in-app updater reads). No file holds a version number. `scripts/release.ps1` only builds a local installer to try. Contributors never need to touch this.

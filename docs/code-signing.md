@@ -13,7 +13,7 @@ have a stable release worth signing.
   this repo in CI) plus a **published `SHA256SUMS.txt`** on each release.
   Users get a one-time SmartScreen warning ("More info → Run anyway").
 - **When we're ready to sign:** buy a **Certum Open Source Code Signing** cert
-  (~$58/yr) — which requires **making this repo public** — and add a signing
+  (~$58/yr) — it requires a public repo, which this now is — and add a signing
   step. See [The Certum path](#the-certum-path) below.
 - **Reality check:** an OV cert (Certum, SignPath, MS) does **not** remove the
   SmartScreen warning immediately — reputation builds over downloads/time. Only
@@ -37,7 +37,7 @@ any one vendor.
 | **Certum Individual** | ~€189/yr | Works for a **private** repo, ~3× the price. |
 | **EV certificate** | ~£300+/yr | Needs a **registered company**. Only option that removes SmartScreen instantly. |
 
-Note: if we're making the repo public anyway, **SignPath Foundation is free** and
+Note: now that the repo is public, **SignPath Foundation is free** and
 covers the same case as Certum-OSS. Certum's advantage is that it's **our own
 cert** (no connector/trusted-build-system dependency, no approval wait). Pick
 Certum if we want control + no wait; pick Foundation if £0 matters more than the
@@ -77,12 +77,11 @@ Do this when we have a release we're happy to stand behind long-term. Order
 matters — SmartScreen reputation accrues **per certificate**, so switching certs
 resets it. Sign consistently once you start.
 
-### 1. Make the repo public
+### 1. Make the repo public (done)
 Certum's cheap cert issues to an **"Open Source Developer"** identity and requires
-a public project. EQ2Parser is already MIT-licensed, so this is a visibility flip,
-not a licensing change. (Security note we already accepted: client-side hardening
-is not defeated by being readable — real upload integrity is server-side, so
-going public costs us nothing on that front.)
+a public project. The repo is public and MIT-licensed, so this step is complete.
+(Security note we accepted at the time: client-side hardening is not defeated by
+being readable — real upload integrity is server-side.)
 
 ### 2. Buy + validate the certificate
 - Product: **Certum "Open Source Code Signing" on SimplySign (cloud)** —
@@ -105,8 +104,10 @@ signtool sign /tr http://time.certum.pl /td sha256 /fd sha256 `
   .\Releases\EQ2Parser-win-Setup.exe
 ```
 
-Then let `scripts/release.ps1 -Publish` (or the CI publish) upload the **signed**
-installer. Velopack hashes the `.nupkg`, not `Setup.exe`, so signing the Setup.exe
+Then the release has to be published with the **signed** installer. Publishing is
+CI-only today (`.github/workflows/release.yml`; the laptop publish flow was
+removed), so local signing means uploading the signed `Setup.exe` over the CI
+asset by hand — Option B is the cleaner route. Velopack hashes the `.nupkg`, not `Setup.exe`, so signing the Setup.exe
 post-`pack` is safe and does not break the update manifest.
 
 **Option B — CI signing (more automation, more setup).** Certum has no turnkey

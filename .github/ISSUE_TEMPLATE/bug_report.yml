@@ -63,7 +63,7 @@ body:
     attributes:
       label: Crash log (crashes only)
       description: |
-        Crashes write `crash-*.txt` into `%LOCALAPPDATA%\EQ2Parser` — paste the newest one.
+        Crashes write `crash-*.txt` into `%LOCALAPPDATA%\EQ2Parser\crashes` — paste the newest one.
         These contain no tokens, but skim before posting anyway.
       render: text
     validations:

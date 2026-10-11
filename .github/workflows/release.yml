@@ -1,7 +1,7 @@
 name: Release
 
-# Builds an attested, checksummed EQ2Parser release from CI — replacing the
-# laptop `release.ps1 -Publish` flow (which trusted a personal gh token).
+# Tests, builds and publishes an attested, checksummed EQ2Parser release from
+# CI. This is the only way to publish (scripts/release.ps1 packs locally only).
 #
 #   * push a tag `vX.Y.Z`      -> builds, attests, and PUBLISHES a release
 #   * run manually (dispatch)  -> builds + attests, uploads the installer +
@@ -11,7 +11,7 @@ name: Release
 # INTERIM (no code signing): integrity comes from build-provenance attestation
 # (proves the binary was built from this repo in CI) + a published SHA256SUMS.txt.
 # Users get a one-time SmartScreen warning. To add a real Authenticode signature
-# later (Certum, ~$58/yr, repo must go public) see docs/code-signing.md — the
+# later (Certum, ~$58/yr) see docs/code-signing.md — the
 # signing step slots in between "Pack" and "Attest". The prior SignPath wiring is
 # in this file's git history (the "interim switch" commit).
 
@@ -59,6 +59,18 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
+      # The same gate as ci.yml. A tag publishes to every installed copy
+      # through auto-update and cannot be recalled, so it must not be able
+      # to ship a commit that does not build clean and pass its tests.
+      - name: Build
+        run: dotnet build --configuration Release
+
+      - name: Format
+        run: dotnet format EQ2Parser.slnx --verify-no-changes --no-restore
+
+      - name: Test
+        run: dotnet test --configuration Release --no-build --verbosity normal
+
       - name: Install Velopack (vpk)
         shell: pwsh
         run: |
@@ -70,6 +82,27 @@ jobs:
         run: >
           dotnet publish src/EQ2Parser.App -c Release -r win-x64 --self-contained true
           -o publish /p:Version=${{ steps.ver.outputs.version }}
+
+      # The v0.2.5 regression, checked on the artifact that ships: MSBuild
+      # once routed the strings.*.json dictionaries into satellite assemblies
+      # and the published app rendered every label as its raw key. The unit
+      # test for this reads bin/, not the self-contained publish output.
+      - name: Verify language dictionaries are embedded
+        shell: pwsh
+        run: |
+          $stream = [System.IO.File]::OpenRead((Resolve-Path 'publish/EQ2Parser.App.dll'))
+          try {
+            $pe = [System.Reflection.PortableExecutable.PEReader]::new($stream)
+            $md = [System.Reflection.Metadata.PEReaderExtensions]::GetMetadataReader($pe)
+            $names = @($md.ManifestResources | ForEach-Object { $md.GetString($md.GetManifestResource($_).Name) })
+          } finally { $stream.Dispose() }
+          $missing = @('en', 'de', 'fr', 'ru' |
+            ForEach-Object { "EQ2Parser.App.Localization.strings.$_.json" } |
+            Where-Object { $names -notcontains $_ })
+          if ($missing) {
+            throw "Not embedded in the published EQ2Parser.App.dll: $($missing -join ', '). Check WithCulture=false on the EmbeddedResource item in EQ2Parser.App.csproj."
+          }
+          Write-Host "All four language dictionaries are embedded."
 
       - name: Pack (Velopack)
         shell: pwsh
@@ -114,33 +147,14 @@ jobs:
             Releases/EQ2Parser-win-Setup.exe
             Releases/SHA256SUMS.txt
 
-      # Real release (tag push, or manual with publish ticked). Publishes to
-      # the public EQ2Parser-releases repo (distribution is kept separate
-      # from the code repo; the in-app updater reads that feed anonymously).
-      # Cross-repo publishing is beyond GITHUB_TOKEN's scope, hence the
-      # RELEASES_PAT secret (fine-grained PAT: Contents read+write on
-      # EQ2Parser-releases only).
-      # STABLE channel: releases are full (not pre-release). The in-app
-      # updater reads stable releases (GithubSource prerelease: false).
-      # Transition note: existing installs still on the prerelease:true
-      # updater also see a newer FULL release (include-prereleases is a
-      # superset), so the first stable release upgrades them onto the
-      # stable channel with no stranding.
-      - name: Preflight — releases-repo credential is present
-        if: ${{ github.event_name == 'push' || inputs.publish }}
-        shell: pwsh
-        env:
-          REL_PAT: ${{ secrets.RELEASES_PAT }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:REL_PAT)) {
-            throw 'RELEASES_PAT is missing. Add a fine-grained PAT (Contents read+write on VortexUK/EQ2Parser-releases) as a Repository secret named RELEASES_PAT.'
-          }
-          Write-Host 'RELEASES_PAT present.'
-
-      # Primary/canonical feed: this repo (public). Same-repo publish uses
-      # the workflow's own GITHUB_TOKEN (contents:write granted above) — no
-      # PAT needed. Main starts as an empty feed, so this is a clean full
-      # release; run FIRST so the fresh post-pack dir isn't perturbed.
+      # Real release (tag push, or manual with publish ticked). Published as a
+      # full release, never a pre-release: the in-app updater reads stable
+      # releases from this repo (GithubSource prerelease: false).
+      # The feed is this repo. Same-repo publish uses the workflow's own
+      # GITHUB_TOKEN (contents:write granted above), so no PAT is involved.
+      # (Until v0.5.7 a second copy also went to the old EQ2Parser-releases
+      # repo for installs on v0.3.2 or earlier; v0.5.7 there still moves any
+      # such install onto this feed.)
       - name: Publish GitHub Release (main repo)
         if: ${{ github.event_name == 'push' || inputs.publish }}
         shell: pwsh
@@ -158,18 +172,3 @@ jobs:
         run: >
           gh release upload "v${{ steps.ver.outputs.version }}" Releases/SHA256SUMS.txt
           --clobber -R VortexUK/EQ2Parser
-
-      # TRANSITIONAL — also publish to the old releases-only repo so installs
-      # still on the pre-move updater (RepoUrl = EQ2Parser-releases, i.e.
-      # anything <= v0.3.2) find this release and migrate onto the main feed.
-      # REMOVE this step (and the RELEASES_PAT preflight) once testers are on
-      # v0.3.3+; from then on they poll the main repo. vpk re-syncs the old
-      # repo's own release history, so running it second is safe.
-      - name: Publish GitHub Release (transitional — old releases repo)
-        if: ${{ github.event_name == 'push' || inputs.publish }}
-        shell: pwsh
-        run: >
-          vpk upload github --repoUrl https://github.com/VortexUK/EQ2Parser-releases
-          --publish --releaseName "EQ2Parser ${{ steps.ver.outputs.version }}"
-          --tag "v${{ steps.ver.outputs.version }}"
-          --token ${{ secrets.RELEASES_PAT }} --outputDir Releases

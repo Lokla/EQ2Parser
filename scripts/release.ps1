@@ -1,13 +1,17 @@
-# Build, pack, and (optionally) publish an EQ2Parser release.
+# Build and pack EQ2Parser locally, for trying an installer before a release.
 #
-#   ./scripts/release.ps1 -Version 0.1.0            # build + pack only
-#   ./scripts/release.ps1 -Version 0.1.0 -Publish   # + create the GitHub release
+#   ./scripts/release.ps1 -Version 0.1.0
 #
-# Publishing needs an authenticated gh CLI (the token is borrowed from it).
-# Releases are marked pre-release; the in-app updater follows them.
+# This does NOT publish. Releases are cut by pushing a tag vX.Y.Z, which runs
+# .github/workflows/release.yml (tests, attestation, checksums, the GitHub
+# release the in-app updater reads). An earlier version of this script could
+# publish from a laptop; that flow went to a feed the updater no longer reads
+# and has been removed.
+#
+# Keep this file ASCII-only: Windows PowerShell 5.1 misreads a BOM-less
+# script that is not.
 param(
-    [Parameter(Mandatory = $true)][string]$Version,
-    [switch]$Publish
+    [Parameter(Mandatory = $true)][string]$Version
 )
 $ErrorActionPreference = 'Stop'
 Set-Location (Join-Path $PSScriptRoot '..')
@@ -20,7 +24,7 @@ if (-not (Get-Command vpk -ErrorAction SilentlyContinue)) {
 
 Write-Host "Publishing v$Version (self-contained win-x64)..."
 dotnet publish src/EQ2Parser.App -c Release -r win-x64 --self-contained true `
-    -o publish /p:Version=$Version
+    -o publish -p:Version=$Version
 if ($LASTEXITCODE -ne 0) { throw 'dotnet publish failed' }
 
 Write-Host 'Packing with Velopack...'
@@ -29,16 +33,5 @@ vpk pack --packId EQ2Parser --packVersion $Version --packDir publish `
     --icon src/EQ2Parser.App/Assets/EQ2Parser.ico
 if ($LASTEXITCODE -ne 0) { throw 'vpk pack failed' }
 
-if ($Publish) {
-    # Publishes to the PUBLIC releases-only repo — the in-app updater reads
-    # it anonymously (the code repo is private).
-    Write-Host 'Uploading to GitHub Releases (pre-release)...'
-    vpk upload github --repoUrl https://github.com/VortexUK/EQ2Parser-releases `
-        --publish --pre --releaseName "EQ2Parser $Version" --tag "v$Version" `
-        --token (gh auth token) --outputDir Releases
-    if ($LASTEXITCODE -ne 0) { throw 'vpk upload failed' }
-    Write-Host "Released v$Version - installer: EQ2Parser-win-Setup.exe on the release page."
-}
-else {
-    Write-Host "Packed. Local installer: Releases/EQ2Parser-win-Setup.exe (use -Publish to release)."
-}
+Write-Host 'Packed. Local installer: Releases/EQ2Parser-win-Setup.exe'
+Write-Host 'To release, push a tag: git tag -a vX.Y.Z -m "EQ2Parser X.Y.Z"; git push origin vX.Y.Z'

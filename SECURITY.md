@@ -16,7 +16,7 @@ A native Windows desktop app (.NET/WPF) that tails EverQuest II log files, parse
 - Executes **server-supplied content**: the Lexicon trigger pack ships regexes (run against every log line) and sound specs. Defences: a 100 ms regex match timeout (ReDoS), a log-line length cap, and refusal of UNC/network sound paths (SMB credential-leak vector).
 - Holds one credential: the user's **EQ2Lexicon API token**, encrypted at rest with DPAPI (CurrentUser) — only ciphertext reaches `settings.json`.
 - Signs uploads with **HMAC-SHA256** over the payload and refuses non-HTTPS upload URLs (loopback dev exception).
-- Auto-updates via **Velopack** from the public [EQ2Parser-releases](https://github.com/VortexUK/EQ2Parser-releases) repo. Releases carry GitHub build-provenance attestation and SHA256SUMS; binaries are not yet Authenticode-signed (see [docs/code-signing.md](docs/code-signing.md)).
+- Auto-updates via **Velopack** from this repo's [GitHub Releases](https://github.com/VortexUK/EQ2Parser/releases). Releases carry GitHub build-provenance attestation and SHA256SUMS; binaries are not yet Authenticode-signed (see [docs/code-signing.md](docs/code-signing.md)).
 
 ## Assets worth protecting
 

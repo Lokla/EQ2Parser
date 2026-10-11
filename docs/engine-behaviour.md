@@ -147,7 +147,9 @@ damage-type buckets → AttackType (per ability + synthetic "All") → swings.
 Skill/Ability(−1), Outgoing Damage(0), Healed(+1), Power Drain(−1),
 Power Replenish(+1), Cure/Dispel(0), Threat(−1), All Outgoing (Ref)(0);
 mirrored incoming set. Swing types: 1 melee, 2 non-melee, 3 healing, 10
-power drain, 13 power replenish, 16 threat, 20 cure/dispel. **Outgoing
+power drain, 13 power replenish, 16 threat, 20 cure/dispel, plus our own 30
+status effect (control-effect apply/release lines; no bucket link, so it files
+only into the Ref buckets and carries no damage stats). **Outgoing
 damage lands in TWO buckets** (its split bucket + aggregate "Outgoing
 Damage"); incoming lands in one. Unknown swing types are silently ignored
 except for the Ref buckets.
@@ -199,7 +201,7 @@ observer-only log parses "empty".)
 **CustomTrigger fields**: regex (compiled once at construction), category
 (default "General"), restrict-to-category/zone flag, active, timer flag +
 timer name, sound type (0 none / 1 beep / 2 wav / 3 TTS) + sound data,
-tabbed + tab age. Key = `category|regex`.
+tabbed + tab age. Key = `zone|category|regex`.
 
 **Trigger share XML** — the format raiders paste into chat to hand triggers
 around. This is the one place interop with ACT matters: the `<Trigger …/>`

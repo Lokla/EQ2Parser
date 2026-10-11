@@ -18,8 +18,8 @@
          hard gates. Per-rule severities live in .editorconfig. -->
     <AnalysisLevel>latest-recommended</AnalysisLevel>
     <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
-    <!-- Version is injected at publish time (-p:Version=X.Y.Z by
-         scripts/release.ps1 and .github/workflows/release.yml); dev builds
+    <!-- Version is injected at publish time (-p:Version=X.Y.Z, from the
+         git tag, by .github/workflows/release.yml); dev builds
          use the SDK default. Do not pin a version here — it is never what
          ships and only misleads. -->
     <Authors>VortexUK</Authors>
