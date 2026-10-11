@@ -13,8 +13,13 @@ per machine, so resolve it relative to this repo's parent),
 its UploadClient/PayloadSigner are the reference for the upload protocol),
 `AdvancedCombatTracker` (EQAditu's companion repo — localization + plugin
 sources; the app itself is closed source). The latter two are on GitHub
-(VortexUK/EQ2LexiconACTPlugin, EQAditu/AdvancedCombatTracker) — clone as
-needed; only EQ2Lexicon is checked out locally.
+(VortexUK/EQ2LexiconACTPlugin, EQAditu/AdvancedCombatTracker) — look for
+them beside this repo first and clone as needed.
+
+This file is NOT loaded when the repo is an additional directory in a
+session rooted elsewhere (the usual case: sessions run from EQ2Lexicon).
+The skills are, so anything an agent must know in that setup lives in a
+skill — see "Skills" below.
 
 ## Hard rules
 
@@ -46,20 +51,48 @@ needed; only EQ2Lexicon is checked out locally.
 ## Build / test
 
 ```
-dotnet build
-dotnet test
+pwsh -NoProfile -File scripts/tools/verify.ps1     # the CI gate, failures only
+pwsh -NoProfile -File scripts/tools/ui-check.ps1   # launch on scratch data, screenshot + rendered text
+dotnet run --project src/EQ2Parser.App             # run from source
+dotnet format EQ2Parser.slnx                       # fix a format failure
 ```
 
+`verify.ps1` is `dotnet build`, `dotnet format --verify-no-changes` and
+`dotnet test` in Release, as CI and `.githooks/pre-push` run them (the
+hook is active only after `git config core.hooksPath .githooks`).
+
 .NET 10 SDK pinned via global.json. `Directory.Build.props` sets nullable,
-warnings-as-errors, and the single `<Version>` used by Velopack releases.
+analyzers and warnings-as-errors, so the build is also the linter. There
+is NO version number in any file: the version is the git tag (`vX.Y.Z`),
+injected at publish time by `.github/workflows/release.yml`. Pushing a
+tag publishes a release to every installed copy; nothing is bumped.
 
 ## Layout
 
 | Path | Purpose |
 |---|---|
-| `src/EQ2Parser.Core` | Parse engine: log tailing, line grammar, encounter model, stats, trigger + spell-timer engine. No UI deps. |
+| `src/EQ2Parser.Core` | Parse engine: log tailing, line grammar, encounter model, stats, trigger + spell-timer engine, upload client. No UI deps. |
 | `src/EQ2Parser.App` | WPF shell (net10.0-windows): main window, overlay, tray, settings, Velopack bootstrap. |
-| `tests/EQ2Parser.Core.Tests` | xunit. Golden-file tests use real EQ2 log excerpts under `tests/logs/`. |
+| `tests/EQ2Parser.Core.Tests` | xunit. Golden-file tests use real EQ2 log excerpts under `tests/logs/`. Also the source-tree guards (localization, layering, agent docs). |
+| `tests/EQ2Parser.App.Tests` | xunit for App services; each class gets its own data directory, parallelism off. |
+| `scripts/tools` | Dev helpers: `verify.ps1`, `ui-check.ps1`, `logmine.ps1`. ASCII-only. |
+| `docs` | `engine-behaviour.md` (the stat and pipeline contract; source comments cite its sections), `code-signing.md`. |
+| `.claude/skills` | Agent skills, all named `parser-*`. |
+
+## Skills
+
+| Skill | Use it to |
+|---|---|
+| `parser-verify` | Run the CI gate and see only the failures |
+| `parser-ui-check` | See a UI change: launch on scratch data, read the rendered text, open the screenshot |
+| `parser-release` | Cut a release: preflight, local publish that is looked at, tag, watch, check assets |
+| `parser-grammar` | Find lines in real logs, measure grammar coverage, add a line shape |
+| `parser-checklists` | Multi-file changes: setting, string, column, overlay, page, trigger field, schema, curated data |
+| `parser-contract` | Anything EQ2Lexicon must agree with: payloads, mirrored lists, the end-to-end upload check |
+| `parser-triage` | A bug report or crash: pin the build, reproduce, fix every path, regression test |
+
+`tests/EQ2Parser.Core.Tests/AgentDocsTests.cs` fails when this file or a
+skill names a repo path that does not exist.
 
 ## Upload wiring (parser → EQ2Lexicon)
 
@@ -68,13 +101,26 @@ The vertical (2026-08-03): `Core/Upload/` holds the testable pieces —
 plus the `UrlProblem` https-only guard with a loopback dev exception),
 `LexiconPayload` (wire DTOs), `PayloadBuilder` (Encounter → payload; 8-hex
 content encid so re-uploads dedupe server-side), `LogPaths.ParseServerName`
-(logger_server = the log's parent dir; "" for the legacy `logs/` root →
-server falls back to its default world), and `UploadQueue` (channel drain off
-the pump thread, bounded retry on network/5xx, 401/403 sets AuthPaused so a
-bad token is never hammered).
+(logger_server = the log's parent dir; "" for the legacy `logs/` root.
+The server requires `logger_server` and has no default world, so the
+parser sends NOTHING for such a log: the auto path skips the fight with a
+reason in the status line (`UploadService.SkippedNoServer`), a manual
+upload is refused locally, `UploadQueue.Enqueue` drops a blank server and
+no attendance snapshot is built — only logs under `logs/<server>/`
+upload, and the server must be on the site's allow-list),
+and `UploadQueue` (channel drain off
+the pump thread, bounded retry on network/5xx and on the site's 429. A 401,
+or a 403 WITHOUT the `X-Lexicon-Reject` response header, sets AuthPaused so
+a bad token or an unapproved account is never hammered. A 403 WITH the
+header is about that one upload: it fails alone and the queue carries on;
+the code `server-not-allowed` also stops sending for that logger_server
+for the session (`SkippedRefusedServer`). The header mirrors `REJECT_HEADER`
+in `EQ2Lexicon/backend/server/api/parses/ingest.py` — keep them in step).
 
-App side: `UploadService` (thin adapter on SourceManager, wired to
-`Engine.EncounterEnded` in Add/Remove exactly like History.QueueSave;
+App side: `UploadService` (thin adapter on SourceManager:
+`SourceManager.OnEncounterEnded`, the one handler Add/Remove subscribe to
+`Engine.EncounterEnded`, calls it beside History.QueueSave, each consumer
+in its own guard so one failing cannot starve the rest;
 `Configure` re-reads settings), `TokenProtector` (DPAPI CurrentUser — only
 ciphertext ever reaches settings.json; ProtectedData is in-box on the
 windows TFM, no package), Settings → "Parse uploads" card (PasswordBox is
@@ -98,9 +144,11 @@ on the site's curated raid-boss list OR it had ≥ 7 player allies
 `GET /api/zones/raid-bosses` (public, `{version, bosses[]}`), synced by
 `App/Services/RaidBossSyncService` (cache `raid_bosses.json`, 6 h refresh
 on the shell tick, offline = last good list, none = headcount alone).
-`RaidUploadFilter.NormaliseBossName` mirrors the site's
-`_normalise_boss_key` (lowercase, NFC, apostrophe look-alikes → `'`) — keep
-them in step. Skipped fights are counted (`SkippedNonRaid`) and named in
+`RaidUploadFilter.NormaliseBossName` mirrors the site's `boss_key` in
+`EQ2Lexicon/backend/server/parses/boss.py` (NFC, lowercase, apostrophe and
+space look-alikes folded; `rankings.py` keeps the old name
+`_normalise_boss_key` as an alias) — keep them in step. Skipped fights
+are counted (`SkippedNonRaid`) and named in
 the Settings status line. Manual fight-tree uploads ignore the rule (the
 click is the consent).
 

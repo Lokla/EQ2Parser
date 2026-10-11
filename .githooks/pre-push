@@ -1,42 +1,20 @@
 #!/bin/sh
 # Pre-push checks — runs automatically before every `git push`.
 # Activate once with:  git config core.hooksPath .githooks
-# Mirrors CI (.github/workflows/ci.yml): build, format, test.
+# Mirrors CI (.github/workflows/ci.yml): build, format, test — via
+# scripts/tools/verify.ps1, which prints failures only and builds under
+# artifacts/ when a running copy of the app holds bin/ open (a plain
+# `dotnet build` here would fail on the locked DLLs and block the push).
 set -e
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-CYAN='\033[0;36m'
-RESET='\033[0m'
-
-echo ""
-echo "${CYAN}Running pre-push checks…${RESET}"
-echo ""
-
-echo "${CYAN}→ Build (analyzers, warnings-as-errors)${RESET}"
-if ! dotnet build --nologo -v quiet; then
-  echo ""
-  echo "${RED}✗ Build failed. Push aborted.${RESET}"
-  exit 1
+root=$(git rev-parse --show-toplevel)
+if command -v pwsh >/dev/null 2>&1; then
+  shell=pwsh
+else
+  shell=powershell.exe
 fi
-echo "${GREEN}  ✓ build OK${RESET}"
-
-echo "${CYAN}→ Formatting (dotnet format --verify-no-changes)${RESET}"
-if ! dotnet format EQ2Parser.slnx --verify-no-changes --no-restore; then
-  echo ""
-  echo "${RED}✗ Formatting issues found. Run: dotnet format EQ2Parser.slnx${RESET}"
-  exit 1
-fi
-echo "${GREEN}  ✓ format OK${RESET}"
-
-echo "${CYAN}→ Tests (dotnet test)${RESET}"
-if ! dotnet test --no-build --nologo -v quiet; then
-  echo ""
-  echo "${RED}✗ Tests failed. Push aborted.${RESET}"
-  exit 1
-fi
-echo "${GREEN}  ✓ tests OK${RESET}"
 
 echo ""
-echo "${GREEN}All checks passed.${RESET}"
+echo "Running pre-push checks (scripts/tools/verify.ps1)…"
 echo ""
+exec "$shell" -NoProfile -ExecutionPolicy Bypass -File "$root/scripts/tools/verify.ps1"
