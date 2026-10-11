@@ -97,6 +97,7 @@
   "MainVm_FightBreadcrumb": "{0}{1}  ·  {2:F0}s  ·  Raid {3} DPS",
   "MainVm_LabelAll": "Alle",
   "MainVm_LabelAllBosses": "Alle Bosse",
+  "MainVm_LabelSelected": "Auswahl",
   "MainVm_LiveCombat": "⚔ Live-Kampf",
   "MainVm_OtherSlice": "(Sonstige)",
   "MainVm_PerspectiveCombined": "Kombiniert",

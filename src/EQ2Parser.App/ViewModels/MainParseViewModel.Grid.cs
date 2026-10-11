@@ -314,6 +314,7 @@ public sealed partial class MainParseViewModel
     {
         "All" => Loc.Get("MainVm_LabelAll"),
         "All Bosses" => Loc.Get("MainVm_LabelAllBosses"),
+        SelectionLabel => Loc.Get("MainVm_LabelSelected"),
         _ => label,
     };
 

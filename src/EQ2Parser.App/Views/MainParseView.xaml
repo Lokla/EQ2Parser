@@ -217,7 +217,10 @@
                         Click="Curation_Click" />
             </WrapPanel>
             <Border Grid.Row="1" Style="{StaticResource Card}" Padding="4">
-            <ListBox ItemsSource="{Binding TreeNodes}" SelectedItem="{Binding SelectedNode}"
+            <!-- Extended = Explorer-style Ctrl/Shift multi-select; selection
+                 is pushed to the VM from FightList_SelectionChanged. -->
+            <ListBox x:Name="FightList" ItemsSource="{Binding TreeNodes}" SelectionMode="Extended"
+                     SelectionChanged="FightList_SelectionChanged"
                      Background="Transparent" BorderThickness="0"
                      HorizontalContentAlignment="Stretch"
                      ScrollViewer.HorizontalScrollBarVisibility="Disabled"

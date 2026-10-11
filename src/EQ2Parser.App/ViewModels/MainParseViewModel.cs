@@ -607,7 +607,13 @@ public sealed partial class MainParseViewModel : ObservableObject
         }
 
         TreeNodes.ReplaceAll(nodes);
+        TreeRebuilt?.Invoke();
     }
+
+    /// <summary>Raised after every tree rebuild. Nodes are fresh objects each
+    /// time, so the list loses its selection — the view re-selects every
+    /// node <see cref="IsTreeSelected"/> accepts.</summary>
+    public event Action? TreeRebuilt;
 
     /// <summary>Trash mobs are articled ("a bloom custodian"); named bosses
     /// are not. Placeholder-titled scraps are never bosses.</summary>
@@ -748,9 +754,6 @@ public sealed partial class MainParseViewModel : ObservableObject
     private bool _followLive = true;
 
     [ObservableProperty]
-    private ParseNode? _selectedNode;
-
-    [ObservableProperty]
     private string _sortColumn = "Damage";
 
     [ObservableProperty]
@@ -768,7 +771,75 @@ public sealed partial class MainParseViewModel : ObservableObject
 
     partial void OnBossesOnlyChanged(bool value) => RebuildTree();
 
-    partial void OnSelectedNodeChanged(ParseNode? value)
+    /// <summary><see cref="AggregateFights.Label"/> of a Ctrl/Shift
+    /// multi-selection. Stored English like the other rollup labels.</summary>
+    public const string SelectionLabel = "Selected";
+
+    /// <summary>The tree's selection changed (Explorer-style Ctrl/Shift
+    /// extended selection). Two or more fights pin a combined rollup of
+    /// exactly those fights; otherwise <paramref name="focus"/> (the node
+    /// just clicked) drives the view as a single selection. Headers and
+    /// rollup nodes swept into a range never join the combined view. An
+    /// empty selection (the list resetting on rebuild) keeps the view.</summary>
+    public void SelectTreeNodes(IReadOnlyList<ParseNode> selected, ParseNode? focus)
+    {
+        if (selected.Count == 0)
+            return;
+        // StartTime/Zone walk the fight's live source list, which the pump
+        // appends to when another log merges in — snapshot under the lock.
+        List<CorrelatedEncounter> fights;
+        string zone;
+        lock (manager.Sync)
+        {
+            fights = [.. selected
+                .Where(n => n.IsFight)
+                .Select(n => n.Fight)
+                .OfType<CorrelatedEncounter>()
+                .Distinct()
+                .OrderBy(f => f.StartTime)];
+            zone = string.Join(" / ", fights.Select(f => f.Zone).Distinct(StringComparer.OrdinalIgnoreCase));
+        }
+        if (fights.Count < 2)
+        {
+            SelectNode(focus ?? selected[^1]);
+            return;
+        }
+        _pinnedFight = new AggregateFights(zone, SelectionLabel, fights);
+        FollowLive = false;
+        FollowSelectionInOverlay();
+        RefreshGrid();
+    }
+
+    /// <summary>Whether a freshly rebuilt tree node should show selected:
+    /// the pinned fight itself, or a member of the pinned multi-selection.</summary>
+    public bool IsTreeSelected(ParseNode node)
+    {
+        if (FollowLive || node.Fight is not CorrelatedEncounter fight)
+            return false;
+        return ReferenceEquals(_pinnedFight, fight)
+            || (_pinnedFight is AggregateFights { Label: SelectionLabel } selection && selection.Fights.Contains(fight));
+    }
+
+    /// <summary>Context-menu target: a right-clicked fight that belongs to
+    /// the current multi-selection stands for the whole selection (Explorer
+    /// semantics — delete/copy/upload act on everything selected).</summary>
+    private ParseNode? WidenToSelection(ParseNode? node)
+    {
+        if (FollowLive
+            || node?.Fight is not CorrelatedEncounter fight
+            || _pinnedFight is not AggregateFights { Label: SelectionLabel } selection
+            || !selection.Fights.Contains(fight))
+            return node;
+        return new ParseNode
+        {
+            Title = $"{selection.Zone} — {selection.Label}",
+            Fight = selection,
+            GroupFights = selection.Fights,
+            IsDeletable = true,
+        };
+    }
+
+    private void SelectNode(ParseNode? value)
     {
         if (value?.Fight is null)
             return;

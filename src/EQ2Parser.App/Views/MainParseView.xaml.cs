@@ -12,9 +12,58 @@ public partial class MainParseView : System.Windows.Controls.UserControl
         // (and the persisted width) is only available once loaded.
         Loaded += (_, _) =>
         {
-            if (DataContext is MainParseViewModel vm && vm.Manager.Settings.TreeColumnWidth is { } width)
+            if (DataContext is not MainParseViewModel vm)
+                return;
+            if (vm.Manager.Settings.TreeColumnWidth is { } width)
                 TreeColumn.Width = new GridLength(Math.Max(TreeColumn.MinWidth, width));
+            _vm = vm;
+            vm.TreeRebuilt += RestoreTreeSelection;
+            RestoreTreeSelection();
         };
+        // The view is recreated on every tab switch; the VM outlives it.
+        Unloaded += (_, _) =>
+        {
+            if (_vm is not null)
+                _vm.TreeRebuilt -= RestoreTreeSelection;
+            _vm = null;
+        };
+    }
+
+    private MainParseViewModel? _vm;
+    private bool _restoringSelection;
+
+    /// <summary>Push the list's extended (Ctrl/Shift) selection to the VM.
+    /// The focus node is the one just added — the click that drives a
+    /// single-fight view when fewer than two fights are selected.</summary>
+    private void FightList_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
+    {
+        if (_restoringSelection || DataContext is not MainParseViewModel vm)
+            return;
+        var selected = FightList.SelectedItems.OfType<ParseNode>().ToList();
+        var focus = e.AddedItems.OfType<ParseNode>().LastOrDefault();
+        vm.SelectTreeNodes(selected, focus);
+    }
+
+    /// <summary>Rebuilt tree nodes are fresh objects, so the list drops its
+    /// selection — re-select whatever the VM still has pinned.</summary>
+    private void RestoreTreeSelection()
+    {
+        if (DataContext is not MainParseViewModel vm)
+            return;
+        _restoringSelection = true;
+        try
+        {
+            FightList.SelectedItems.Clear();
+            foreach (var node in vm.TreeNodes)
+            {
+                if (vm.IsTreeSelected(node))
+                    FightList.SelectedItems.Add(node);
+            }
+        }
+        finally
+        {
+            _restoringSelection = false;
+        }
     }
 
     /// <summary>The Copy-for-Discord quick picker: rebuild the submenu just

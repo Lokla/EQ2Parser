@@ -37,6 +37,7 @@ public sealed partial class MainParseViewModel
     [RelayCommand]
     private void CopyNode(ParseNode? node)
     {
+        node = WidenToSelection(node);
         if (node is null)
             return;
         string? text;
@@ -88,11 +89,13 @@ public sealed partial class MainParseViewModel
         return null;
     }
 
-    /// <summary>Delete a fight (or a whole zone group) from history — the
+    /// <summary>Delete a fight (a whole zone group, or every fight of a
+    /// multi-selection) from history — the
     /// fights stay in the archive, and Ctrl+Z brings them straight back.</summary>
     [RelayCommand]
     private void DeleteNode(ParseNode? node)
     {
+        node = WidenToSelection(node);
         if (node is null)
             return;
         List<CorrelatedEncounter> deleted = [];
@@ -117,6 +120,10 @@ public sealed partial class MainParseViewModel
                 if (ReferenceEquals(_pinnedFight, fight))
                     _pinnedFight = null;
             }
+            // A pinned rollup/multi-selection must not keep showing fights
+            // that just left history.
+            if (_pinnedFight is AggregateFights aggregate && deleted.Any(aggregate.Fights.Contains))
+                _pinnedFight = null;
         }
         if (deleted.Count > 0)
         {
@@ -153,18 +160,26 @@ public sealed partial class MainParseViewModel
     /// <summary>Fight context menu: upload every source's view of the fight
     /// to EQ2Lexicon — the same payloads auto-upload would have sent (the
     /// site mirror-groups them and keeps the longest as primary). Results
-    /// surface on the Settings → Parse uploads status line.</summary>
+    /// surface on the Settings → Parse uploads status line. A multi-selection
+    /// uploads every selected fight.</summary>
     [RelayCommand]
     private void UploadNode(ParseNode? node)
     {
-        if (node?.Fight is not CorrelatedEncounter fight)
-            return;
-        List<Encounter> sources;
+        node = WidenToSelection(node);
+        IReadOnlyList<CorrelatedEncounter> fights = node switch
+        {
+            { GroupFights: { Count: > 0 } group } => group,
+            { Fight: CorrelatedEncounter fight } => [fight],
+            _ => [],
+        };
+        List<List<Encounter>> uploads = [];
         lock (manager.Sync)
         {
-            sources = [.. fight.Sources];
+            foreach (var fight in fights)
+                uploads.Add([.. fight.Sources]);
         }
-        manager.Uploads.UploadFight(sources);
+        foreach (var sources in uploads)
+            manager.Uploads.UploadFight(sources);
     }
 
     /// <summary>Fight context menu: open the raw log at the fight's start.</summary>

@@ -115,7 +115,7 @@ public sealed partial class MainParseViewModel
             string.Equals(p.Name, presetName, StringComparison.OrdinalIgnoreCase));
         if (preset is null)
             return;
-        SetClipboard(BuildDiscordExport(node, SpecOf(preset)));
+        SetClipboard(BuildDiscordExport(WidenToSelection(node), SpecOf(preset)));
     }
 
     /// <summary>Sort order per column key; unknown/null = Damage.
@@ -176,11 +176,12 @@ public sealed partial class MainParseViewModel
 
     [RelayCommand]
     private void CopyDiscord(ParseNode? node) =>
-        SetClipboard(BuildDiscordExport(node, CurrentExportSpec));
+        SetClipboard(BuildDiscordExport(WidenToSelection(node), CurrentExportSpec));
 
     [RelayCommand]
     private void OpenExport(ParseNode? node)
     {
+        node = WidenToSelection(node);
         if (node is null)
             return;
         new Views.ExportWindow(this, node) { Owner = System.Windows.Application.Current?.MainWindow }
