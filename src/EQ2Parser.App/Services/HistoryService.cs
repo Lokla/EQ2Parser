@@ -43,7 +43,8 @@ public enum ArchiveState
 /// failures move the file aside and which leave it alone), a fight that
 /// cannot be restored costs that fight (<see cref="RestoreInto"/>), and a
 /// save that fails costs that save — each with a crash report, a journal
-/// line and a property a UI surface can show (<see cref="Problem"/>).
+/// line and state the app shows: the warning strip in the main window and
+/// the Archive window build their text from it (ViewModels.ArchiveNotice).
 /// </summary>
 public sealed class HistoryService : IDisposable
 {
@@ -118,6 +119,14 @@ public sealed class HistoryService : IDisposable
     /// created after the rename.</summary>
     public string? QuarantinedPath { get; }
 
+    /// <summary>The exception behind a <see cref="State"/> that is not
+    /// Healthy: SQLite's verdict on a damaged file, or whatever kept the
+    /// archive from being opened or a fresh one from being created. Null
+    /// when the archive opened normally. A view shows its
+    /// <see cref="Kind"/> (the type and SQLite's result code) as a detail,
+    /// never its message.</summary>
+    public Exception? OpenError { get; }
+
     /// <summary>False for a session running without an archive.</summary>
     public bool IsAvailable => _store is not null;
 
@@ -136,11 +145,14 @@ public sealed class HistoryService : IDisposable
     /// fights (null = it did not).</summary>
     public Exception? RestoreError => _restoreError;
 
-    /// <summary>Everything wrong with the archive right now, as English
-    /// text for a status line or a banner; null when nothing is. It covers
-    /// the startup verdict (<see cref="DegradedReason"/>), fights the
-    /// restore could not load and saves that failed, so a surface bound to
-    /// this one property misses none of them. Cheap enough for the UI tick.</summary>
+    /// <summary>Everything wrong with the archive right now, as ENGLISH
+    /// text; null when nothing is. It covers the startup verdict
+    /// (<see cref="DegradedReason"/>), fights the restore could not load
+    /// and saves that failed. For a log or a report: what the app shows on
+    /// screen is ViewModels.ArchiveNotice, which says the same things in
+    /// the interface language from the same state (<see cref="State"/>,
+    /// <see cref="OpenError"/>, <see cref="QuarantinedPath"/> and the
+    /// counters) and never from this string.</summary>
     public string? Problem
     {
         get
@@ -170,7 +182,7 @@ public sealed class HistoryService : IDisposable
 
     public HistoryService()
     {
-        (_store, State, DegradedReason, QuarantinedPath) = Open(Path.Combine(AppSettings.Directory, FileName));
+        (_store, State, DegradedReason, QuarantinedPath, OpenError) = Open(Path.Combine(AppSettings.Directory, FileName));
         _writer = _store is { } store ? Task.Run(() => WriteLoopAsync(store)) : Task.CompletedTask;
     }
 
@@ -211,13 +223,13 @@ public sealed class HistoryService : IDisposable
     /// constructor returns, so whoever reads <see cref="State"/> finds the
     /// evidence already there. The journal names exception types and the
     /// quarantined file, never a path.</summary>
-    private static (HistoryStore? Store, ArchiveState State, string? Reason, string? Quarantined) Open(string path)
+    private static (HistoryStore? Store, ArchiveState State, string? Reason, string? Quarantined, Exception? Error) Open(string path)
     {
         Exception failure;
         try
         {
             Directory.CreateDirectory(AppSettings.Directory);
-            return (new HistoryStore(path), ArchiveState.Healthy, null, null);
+            return (new HistoryStore(path), ArchiveState.Healthy, null, null, null);
         }
         catch (Exception ex)
         {
@@ -265,7 +277,8 @@ public sealed class HistoryService : IDisposable
                 fresh,
                 ArchiveState.Quarantined,
                 $"The fight archive ({FileName}) was damaged and could not be read. It has been renamed to {quarantinedName} in the data folder and a new, empty archive started. Nothing was deleted: your earlier fights are in the renamed file, which a later version or a manual repair may still recover.",
-                quarantined);
+                quarantined,
+                failure);
         }
         catch (Exception freshError)
         {
@@ -276,12 +289,12 @@ public sealed class HistoryService : IDisposable
                 quarantined);
         }
 
-        static (HistoryStore?, ArchiveState, string?, string?) Unavailable(
+        static (HistoryStore?, ArchiveState, string?, string?, Exception?) Unavailable(
             Exception error, string reason, string journal, string? quarantined)
         {
             CrashLog.Report(UnavailableKind, error, reason, always: true);
             SessionJournal.Mark($"archive UNAVAILABLE — {FileName} {journal} ({Kind(error)}); this session saves no fights");
-            return (null, ArchiveState.Unavailable, reason, quarantined);
+            return (null, ArchiveState.Unavailable, reason, quarantined, error);
         }
     }
 

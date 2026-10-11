@@ -144,8 +144,19 @@ public sealed class LocalizedTextTests : IDisposable
         for (var i = 0; i < LineFaultBreaker.DefaultTripAfter; i++)
             source.PumpLine(Poison);
 
-        LocTestHost.In("de", () =>
-            Assert.Equal("Fehler: " + source.Error!.Message, SourcesViewModel.StatusFor(source)));
+        // Updated on purpose. This used to pin "Fehler: " followed by the
+        // source's own English sentence ("stopped after 200 lines in a row
+        // failed to process — last: …"): half the row in the wrong
+        // language. The sentence is the row's now, built from the facts
+        // of the stop. What stays untouched is what was never interface
+        // text: the last exception's type and its own message.
+        LocTestHost.In("de", () => Assert.Equal(
+            "Fehler: angehalten, nachdem 200 Zeilen in Folge nicht verarbeitet werden konnten — zuletzt: InvalidOperationException: raid-line handler broke",
+            SourcesViewModel.StatusFor(source)));
+        // The exception the crash report is written from did not change.
+        Assert.Equal(
+            "stopped after 200 lines in a row failed to process — last: InvalidOperationException: raid-line handler broke",
+            source.Error!.Message);
     }
 
     [Fact]

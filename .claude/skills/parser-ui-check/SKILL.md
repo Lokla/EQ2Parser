@@ -59,7 +59,10 @@ For each page it writes two files under `artifacts/ui-check/` (git-ignored; `-Ou
 - **`-Expect "text"`** (several as `"one|two"`): each text must appear in some element on the pages
   visited. Use it to assert the thing you just added.
 - **The app survived** and wrote no crash report into the scratch data folder. A new crash
-  report fails the run and its first lines are printed.
+  report fails the run and its first lines are printed. Some reports are the app doing its
+  job (a damaged archive it set aside, a log it could not read): a scenario that provokes one
+  on purpose names its kind, the last part of the file name, as in
+  `-AllowReport archive-quarantined` (several as `"one|two"`).
 
 Verdict line: `ui-check: OK` (exit 0), `ui-check: FAIL` (exit 1), `ui-check: INCOMPLETE`
 (exit 2: bad arguments, nothing was checked).

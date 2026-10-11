@@ -12,6 +12,10 @@ namespace EQ2Parser.App.Tests;
 /// strings resolved (never raw keys), a bad user override file reported
 /// instead of ignored in silence, a trigger disabled for being too slow
 /// announced, and one failing fight consumer unable to starve the others.
+/// And as it lets go: a fight in progress when its source is removed or the
+/// app closes is ended, announced and archived; a stopped source does not
+/// hold the UI in import mode; one failing raid-line consumer does not
+/// starve the other two.
 /// </summary>
 public sealed class SourceManagerStartupTests : IDisposable
 {
@@ -236,6 +240,257 @@ public sealed class SourceManagerStartupTests : IDisposable
             Assert.Equal(2, fight.Sources.Count);
         }
         Assert.DoesNotContain("fight consumer FAILED", Journal());
+    }
+
+    // ── A fight in progress when its source goes away ───────────────────────
+
+    /// <summary>A hit on a named mob, stamped at <paramref name="epoch"/>.</summary>
+    private static string Hit(long epoch) => $"({epoch})[s] YOUR Smite hits Lord Oak for 500 divine damage.";
+
+    /// <summary>A manager tailing one log whose owner is two lines into a
+    /// fight: read by the real pump, from a real file, stamped now.</summary>
+    private async Task<(LogSource Source, string Path)> MidFight(SourceManager manager)
+    {
+        var path = _dir.FileIn("eq2log_Tester.txt");
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        await File.WriteAllLinesAsync(path, [Hit(now), Hit(now + 1)]);
+        var source = manager.Add(path, parseFromStart: true);
+        await WaitFor(() => source.Processor.LinesMatched >= 2, "the pump to read the fight");
+        lock (manager.Sync)
+        {
+            Assert.True(source.Engine.InCombat);
+            // Not ended, so nothing has heard of it yet.
+            Assert.Empty(manager.Correlator.History);
+        }
+        return (source, path);
+    }
+
+    private static async Task WaitFor(Func<bool> condition, string what)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(15);
+        while (!condition())
+        {
+            Assert.True(DateTime.UtcNow < deadline, $"timed out waiting for {what}");
+            await Task.Delay(10);
+        }
+    }
+
+    [Fact]
+    public async Task A_Source_Removed_Mid_Fight_Has_Its_Fight_Ended_Announced_And_Archived()
+    {
+        using var manager = new SourceManager(Settings());
+        var (source, _) = await MidFight(manager);
+
+        // Before: the handlers were detached and the pump cancelled with
+        // the engine still in combat. The fight was never ended, so it
+        // reached no consumer and no archive.
+        manager.Remove(source);
+
+        lock (manager.Sync)
+        {
+            Assert.False(source.Engine.InCombat);
+            Assert.False(Assert.Single(source.Engine.History).Active);
+            // The consumers were still attached when it ended.
+            Assert.Equal("Lord Oak", Assert.Single(manager.Correlator.History).Title);
+        }
+        Assert.Empty(manager.Sources);
+        await WaitFor(() => manager.History.Search(null, null).Count == 1, "the archive to take the fight");
+        Assert.Equal("Lord Oak", Assert.Single(manager.History.Search(null, null)).Title);
+        Assert.Equal(0, manager.History.SaveFailures);
+        var journal = Journal();
+        Assert.Contains("source removed: eq2log_Tester.txt; its fight in progress was ended", journal);
+        Assert.DoesNotContain("fight consumer FAILED", journal);
+    }
+
+    [Fact]
+    public void A_Source_Removed_Out_Of_Combat_Announces_Nothing()
+    {
+        using var manager = new SourceManager(Settings());
+        var source = AddSource(manager);
+
+        manager.Remove(source);
+
+        lock (manager.Sync)
+        {
+            Assert.Empty(manager.Correlator.History);
+        }
+        Assert.Contains("source removed: eq2log_Tester.txt", Journal());
+        Assert.DoesNotContain("fight in progress", Journal());
+    }
+
+    [Fact]
+    public async Task Closing_The_App_Mid_Fight_Leaves_The_Fight_In_The_Archive_File()
+    {
+        var manager = new SourceManager(Settings());
+        var (source, path) = await MidFight(manager);
+
+        // The exit, as App.OnExit runs it. Before: the pumps were cancelled
+        // with the engine in combat and the archive closed without the
+        // last pull of the night.
+        manager.StopFolderWatch();
+        manager.StopPumps();
+        manager.PersistSources();
+        manager.Dispose();
+
+        Assert.False(source.Engine.InCombat);
+        // The FILE, read with nothing of the app left open on it.
+        using (var conn = new Microsoft.Data.Sqlite.SqliteConnection(
+            EQ2Parser.Core.History.HistoryStore.ConnectionString(_dir.FileIn("history.db"))))
+        {
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT title || ' / ' || (SELECT COUNT(*) FROM swings WHERE encounter_id = encounters.id) FROM encounters;";
+            using var reader = cmd.ExecuteReader();
+            Assert.True(reader.Read(), "history.db holds no fight");
+            Assert.Equal("Lord Oak / 2", reader.GetString(0));
+            Assert.False(reader.Read(), "history.db holds more than the one fight");
+        }
+        // The exit snapshot was taken after the save, so it has it too.
+        Assert.True(File.Exists(Path.Combine(_dir.Path, "backups", "history.db.bak")));
+        // The resume position is the end of what that fight holds: the
+        // next session starts on the line after it, not inside it.
+        var saved = Assert.Single(manager.Settings.Sources);
+        Assert.Equal(new FileInfo(path).Length, saved.LastPosition);
+        var journal = Journal();
+        Assert.Contains("exit: fight in progress ended — eq2log_Tester.txt", journal);
+        Assert.DoesNotContain("exit did not wait", journal);
+        Assert.DoesNotContain("fight consumer FAILED", journal);
+    }
+
+    [Fact]
+    public void Closing_The_App_Out_Of_Combat_Ends_Nothing()
+    {
+        var manager = new SourceManager(Settings());
+        AddSource(manager);
+
+        manager.Dispose();
+
+        Assert.DoesNotContain("fight in progress", Journal());
+        Assert.False(File.Exists(Path.Combine(_dir.Path, "backups", "history.db.bak")));
+    }
+
+    [Fact]
+    public void App_Exit_Stops_Reading_Before_It_Saves_Positions_And_Ends_Fights_Before_The_Archive_Closes()
+    {
+        // Source-level, like the startup-order test above and for the same
+        // reason: App.OnExit cannot run in a test. Two orders matter. In
+        // OnExit, the pumps stop before the resume positions are saved (a
+        // line read after the save would be in tonight's last fight AND
+        // read again next session). In SourceManager.Dispose, the fights
+        // in progress end before the archive is disposed, or the save they
+        // queue has nowhere to go.
+        var exit = File.ReadAllText(Path.Combine(RepoRoot(), "src", "EQ2Parser.App", "App.xaml.cs"));
+        var onExit = exit.IndexOf("protected override void OnExit(", StringComparison.Ordinal);
+        var stopPumps = exit.IndexOf("_manager?.StopPumps();", onExit, StringComparison.Ordinal);
+        var persist = exit.IndexOf("_manager?.PersistSources();", onExit, StringComparison.Ordinal);
+        var dispose = exit.IndexOf("_manager?.Dispose();", onExit, StringComparison.Ordinal);
+        Assert.True(onExit >= 0 && stopPumps >= 0 && persist >= 0 && dispose >= 0, "App.OnExit no longer has the three steps this test orders");
+        Assert.True(stopPumps < persist, "the pumps must stop before PersistSources saves their positions");
+        Assert.True(persist < dispose, "PersistSources must run before the manager is disposed");
+
+        var manager = File.ReadAllText(Path.Combine(RepoRoot(), "src", "EQ2Parser.App", "Services", "SourceManager.cs"));
+        var disposeBody = manager.IndexOf("public void Dispose()", StringComparison.Ordinal);
+        var endFights = manager.IndexOf("EndFightInProgress(\"the app is closing\")", disposeBody, StringComparison.Ordinal);
+        var closeArchive = manager.IndexOf("History.Dispose();", disposeBody, StringComparison.Ordinal);
+        Assert.True(disposeBody >= 0 && endFights >= 0 && closeArchive >= 0, "SourceManager.Dispose no longer has the steps this test orders");
+        Assert.True(endFights < closeArchive, "fights in progress must be ended before the archive is disposed");
+    }
+
+    // ── A stopped source and the import throttle ────────────────────────────
+
+    [Fact]
+    public async Task A_Stopped_Source_Far_Behind_Its_Log_Does_Not_Put_The_Ui_In_Import_Mode()
+    {
+        using var manager = new SourceManager(Settings());
+        var path = _dir.FileIn("eq2log_Tester.txt");
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        await File.WriteAllLinesAsync(path, [Hit(now), Hit(now + 1)]);
+        // The log cannot be read (a byte-range lock held by another
+        // handle), so the source stops with a reader failure.
+        using var locker = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete);
+        var lockedLength = locker.Length;
+        locker.Lock(0, lockedLength);
+        var source = manager.Add(path, parseFromStart: true);
+        await WaitFor(() => source.Error is not null, "the source to stop");
+
+        // The game keeps writing. Nobody reads this log any more, so it
+        // runs megabytes ahead of where the source stopped.
+        locker.Position = lockedLength;
+        await locker.WriteAsync(new byte[2_000_000]);
+        await locker.FlushAsync();
+        Assert.True(new FileInfo(path).Length - source.LastPosition > 1_000_000);
+
+        // Before: PendingBytes was that gap, so ImportBusy was true from
+        // here to the end of the session — the main page at one refresh
+        // every two seconds, the overlays showing "Importing history…".
+        Assert.Equal(0, source.PendingBytes);
+        Assert.False(manager.ImportBusy);
+        locker.Unlock(0, lockedLength);
+    }
+
+    // ── Raid-line consumers, each isolated ──────────────────────────────────
+
+    [Fact]
+    public void Every_Raid_Line_Consumer_Runs_And_Every_Failure_Reaches_The_Caller()
+    {
+        List<string> ran = [];
+
+        // One fails: the two around it run, and the failure comes out as
+        // itself for the processor's raid-line guard to report.
+        var one = Assert.Throws<InvalidOperationException>(() => SourceManager.RunRaidLineConsumers(
+            "line", T0,
+            (_, _) => ran.Add("roster"),
+            (_, _) => throw new InvalidOperationException("dkp broke"),
+            (_, _) => ran.Add("loot")));
+        Assert.Equal(["roster", "loot"], ran);
+        Assert.Equal("dkp broke", one.Message);
+        Assert.Contains(nameof(Every_Raid_Line_Consumer_Runs_And_Every_Failure_Reaches_The_Caller), one.StackTrace);
+
+        // Two fail: the third still runs, and neither failure is lost.
+        ran.Clear();
+        var two = Assert.Throws<AggregateException>(() => SourceManager.RunRaidLineConsumers(
+            "line", T0,
+            (_, _) => throw new InvalidOperationException("roster broke"),
+            (_, _) => ran.Add("dkp"),
+            (_, _) => throw new FormatException("loot broke")));
+        Assert.Equal(["dkp"], ran);
+        Assert.Equal(["roster broke", "loot broke"], two.InnerExceptions.Select(e => e.Message));
+
+        // None fail: nothing is thrown.
+        ran.Clear();
+        SourceManager.RunRaidLineConsumers("line", T0, (_, _) => ran.Add("roster"), (_, _) => ran.Add("dkp"), (_, _) => ran.Add("loot"));
+        Assert.Equal(["roster", "dkp", "loot"], ran);
+    }
+
+    [Fact]
+    public void A_Raid_Line_Consumer_That_Throws_On_A_Real_Line_Does_Not_Cost_The_One_After_It()
+    {
+        using var manager = new SourceManager(Settings());
+        var source = AddSource(manager);
+        // DKP progress is the second of the three raid-line consumers and
+        // the loot tracker the third. A subscriber of the first's event
+        // throws, as a bug on the Raid page would.
+        manager.DkpProgress.LootEchoSeen += static (_, _) => throw new InvalidOperationException("dkp consumer broke");
+        // One line both act on: a loot line (the tracker records the item)
+        // that also reads as a loot-charge echo (the item link, " assigned
+        // to " and " dkp").
+        var line = $"({T0.ToUnixTimeSeconds()})[s] Alder loots \\aITEM 1 2:Oak Blade\\/a from the Exquisite Chest of Lord Oak assigned to the raid for 5 dkp.";
+
+        Assert.True(source.PumpLine(new EQ2Parser.Core.Logs.TailedLine(line, T0)));
+
+        // Before: the throw ended the handler, and the loot tracker never
+        // saw the line.
+        var item = Assert.Single(manager.Loot.Snapshot());
+        Assert.Equal("Oak Blade", item.ItemName);
+        Assert.Equal("Alder", item.LootedBy);
+        // Still one contained raid-line alert fault, reported as before:
+        // the line was not skipped.
+        Assert.Equal(1, source.AlertFaults);
+        Assert.IsType<InvalidOperationException>(source.LastAlertError);
+        Assert.Equal(0, source.SkippedLines);
+        var report = File.ReadAllText(Assert.Single(Directory.GetFiles(CrashLog.Directory, $"crash-*-{LogSource.AlertKind}*.txt")));
+        Assert.Contains("Alert stage: raid line", report);
+        Assert.Contains("dkp consumer broke", report);
     }
 
     private static string RepoRoot()

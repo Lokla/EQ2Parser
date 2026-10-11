@@ -290,6 +290,16 @@ pattern; helper methods that assume the caller already holds the lock
 SQLite-backed subsystem with its own lock; fights it loads or mines (e.g.
 `AbilityMiner` on a background task) are fresh objects deserialized from disk,
 not the live ones the pump is mutating, so they carry no race with the writer.
+It has ONE connection to `history.db`, and every user of it — the background
+writer saving finished fights, the UI thread searching, loading and purging,
+the pump thread collapsing mirrors — takes that lock around each call. They
+queue on the lock, so SQLite never sees two of them at once. A statement waits
+at most two seconds for a database that ANOTHER process holds locked
+(`HistoryStore.BusyTimeoutSeconds`, set as the connection's default timeout;
+the provider's own default is thirty) and then fails as busy. That bound is
+what a locked file costs at startup, where the store is opened on the UI
+thread; it never applies between the app's own threads, and it limits waiting
+only, never how long a statement may run.
 
 **Per-line fault isolation.** The pump treats each line as its own unit of
 failure (`LogSource.PumpLine`), in three sizes:
@@ -304,8 +314,13 @@ failure (`LogSource.PumpLine`), in three sizes:
   death. The line counts as processed. `LogSource` writes a `log-alert` crash
   report (at most five per source) and an `alert handler FAILED` journal line
   (the first, then at most one per ten seconds), and counts it in
-  `LogSource.AlertFaults`; it is not a skipped line and never counts toward
-  stopping the source.
+  `LogSource.AlertFaults`, which the Sources row shows after its counters; it
+  is not a skipped line and never counts toward stopping the source. Inside
+  the `RaidLine` stage the three raid consumers (roster tracker, DKP progress,
+  loot tracker) each run in their own guard
+  (`SourceManager.RunRaidLineConsumers`), so one that throws does not cost the
+  other two that line; what failed is then rethrown, so it is still reported
+  as one raid-line alert fault, with the line quoted.
 - **The line itself throws** (the parse helpers, the idle rule's end-of-fight
   announcement, the grammar, `SetEncounter` / `AddSwing`). The line is skipped
   and the tail reads on: the engine is only mutated under the lock, the unwind
@@ -321,7 +336,43 @@ failure (`LogSource.PumpLine`), in three sizes:
   combat" for the rest of the session. It holds everything parsed before the
   stop and nothing invented; what it lacks is the lines that failed or were
   never read. `Error` is set last: whoever sees it finds the evidence written
-  and the fight ended.
+  and the fight ended. The same publication carries the reason as facts
+  (`LogSource.Stopped`: reader or breaker, the count, the exception
+  underneath), which is what the Sources row words in the interface language;
+  the exception's own message stays English for the crash report. A stopped
+  source reports no pending bytes (`LogSource.PendingBytes`): nothing will
+  read its log again, and counting the growing gap as backlog held
+  `SourceManager.ImportBusy`, and with it the main page and the overlays, in
+  import mode for the rest of the session.
+
+**A source that goes away mid-fight.** The idle rule only runs when the next
+line arrives, so a source that is removed, or is tailing when the app closes,
+would leave its fight unended: never archived, never uploaded. Both end it
+through the same call a stopping source uses (`LogSource.EndFightInProgress`),
+in this order:
+
+1. The pump is stopped (`LogSource.StopPump`: cancel, then wait at most two
+   seconds). A pump finishes the read batch it is on before it ends, so once
+   it has stopped, every line up to its position is in the engine and none
+   after it.
+2. The fight is ended under the lock while its consumers are still attached.
+   `SourceManager.Remove` ends it and detaches the handlers inside one lock;
+   `SourceManager.Dispose` ends every source's fight before it disposes
+   anything, and never detaches at all.
+3. On exit only: `App.OnExit` stops the pumps BEFORE it saves the resume
+   positions, so the saved position is the last line that fight holds. Then
+   the archive is disposed, which gives its writer up to five seconds to
+   drain the queue (the fight just ended is in it) before the exit snapshot,
+   and the upload queue, which cancels its drain and waits two. The upload of
+   that last fight may well not complete: the queue is in memory, and it has
+   had only as long as the archive took to close. The fight is in the archive
+   and can be uploaded from the fight tree later.
+
+No wait was added to the exit: steps 1 and 2 are the old "dispose the sources"
+taken apart. A fight ended this way is not flagged. It is the fight a
+link-death mid-pull leaves, which the idle rule has always ended and saved
+unmarked, and its numbers are computed like any other's; the journal says it
+happened (`exit: fight in progress ended`, `source removed: ...`).
 
 **Fight-consumer fan-out.** `ParserEngine.EncounterEnded` fires on the pump
 thread, under the lock, from inside the line that ended the fight. Every source

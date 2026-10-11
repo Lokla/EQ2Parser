@@ -5,6 +5,28 @@ using EQ2Parser.Core.Triggers;
 
 namespace EQ2Parser.App.Services;
 
+/// <summary>Which of the two things that stop a source happened.</summary>
+public enum SourceStopReason
+{
+    /// <summary>The tail reader itself failed (an IO error mid-read).</summary>
+    ReaderFailed,
+
+    /// <summary>The line-fault breaker tripped: too many lines in a row
+    /// failed to process.</summary>
+    TooManyFailedLines,
+}
+
+/// <summary>Why a source stopped, as facts rather than as a sentence, so
+/// each reader can say it in its own words: the Sources row builds its line
+/// from these in the interface language, while the crash report and the
+/// journal keep their English. <paramref name="FailedLines"/> is the run of
+/// consecutive failures that tripped the breaker (0 for a reader failure).
+/// <paramref name="Cause"/> is the exception underneath: the reader's, or
+/// the last failed line's. <paramref name="Error"/> is what
+/// <see cref="LogSource.Error"/> reports: the same exception for a reader
+/// failure, the "stopped after N lines" wrapper for the breaker.</summary>
+public sealed record SourceStop(SourceStopReason Reason, int FailedLines, Exception Cause, Exception Error);
+
 /// <summary>
 /// One tailed log file: reader + processor + engine, pumped on a background
 /// task. All engine mutation happens under the manager's shared sync object,
@@ -19,7 +41,9 @@ namespace EQ2Parser.App.Services;
 /// the source, and then <see cref="Error"/> says so. A source that stops
 /// ends its fight in progress first (<see cref="EndFightInProgress"/>), so
 /// the fight is saved and uploaded like any other instead of sitting "in
-/// combat" until the app closes.
+/// combat" until the app closes. A source that is removed, and every source
+/// when the app closes, does the same through <see cref="StopPump"/> and
+/// then <see cref="EndFightInProgress"/> (SourceManager owns that order).
 ///
 /// A fault in an ALERT handler is smaller still: the processor contains it
 /// and the line's combat data is parsed all the same (see
@@ -80,14 +104,26 @@ public sealed class LogSource : IDisposable
     /// persisted so the next session resumes where this one left off.</summary>
     public long LastPosition => _reader.ConsumedPosition;
 
-    /// <summary>Bytes between the consumed position and the file's current
-    /// end — large while a parse-from-start import chews backlog, ~zero at
-    /// live tail. UI surfaces read this to throttle themselves during
-    /// imports so the pump keeps the lock.</summary>
+    /// <summary>Bytes this source still has to READ: the gap between the
+    /// consumed position and the file's current end — large while a
+    /// parse-from-start import chews backlog, ~zero at live tail. UI
+    /// surfaces read this to throttle themselves during imports so the pump
+    /// keeps the lock.
+    ///
+    /// Zero for a source that has stopped. Its pump has ended, so nothing
+    /// will ever read those bytes and there is no lock to leave free for
+    /// it — while the game goes on writing the file, so the raw gap only
+    /// grows. Counted as pending work, it passed the import threshold a
+    /// megabyte later and stayed there: SourceManager.ImportBusy was then
+    /// true for the rest of the session, the main page refreshing every
+    /// two seconds and the mini-parse overlays showing "Importing
+    /// history…" in place of the live fight of every OTHER source.</summary>
     public long PendingBytes
     {
         get
         {
+            if (_stopped is not null)
+                return 0;
             try
             {
                 return Math.Max(0, new FileInfo(Path).Length - _reader.ConsumedPosition);
@@ -99,12 +135,21 @@ public sealed class LogSource : IDisposable
         }
     }
 
+    /// <summary>One publication for everything about a stop, so no reader
+    /// can see the exception without the facts that go with it.</summary>
+    private volatile SourceStop? _stopped;
+
     /// <summary>Set when the tail loop has STOPPED: the reader failed (file
     /// unreadable etc.) or the line-fault breaker tripped. A source with
     /// skipped lines and no Error is still tailing. Set LAST: by the time
     /// anyone can see it, the evidence is written and the fight that was
     /// in progress has been ended and announced.</summary>
-    public Exception? Error { get; private set; }
+    public Exception? Error => _stopped?.Error;
+
+    /// <summary>The same stop as <see cref="Error"/>, as structured facts
+    /// (null while the source is tailing). What a view shows; the
+    /// exception's message is for the crash report.</summary>
+    public SourceStop? Stopped => _stopped;
 
     /// <summary>Lines dropped this session because processing them threw.
     /// The source is alive while <see cref="Error"/> is null — the Sources
@@ -222,7 +267,7 @@ public sealed class LogSource : IDisposable
             CrashLog.Report("log-reader", ex, $"Log source: {FileName}", always: true);
             var endedFight = EndFightInProgress();
             SessionJournal.Mark($"source STOPPED: {FileName} — the log reader failed ({ex.GetType().Name}){FightNote(endedFight)}");
-            Error = ex;
+            _stopped = new SourceStop(SourceStopReason.ReaderFailed, 0, ex, ex);
         }
     }
 
@@ -264,8 +309,23 @@ public sealed class LogSource : IDisposable
     /// the announcement, so even a subscriber that throws leaves the fight
     /// ended and in the engine's history; that throw is reported and the
     /// stop carries on (SourceManager isolates its consumers, so in the
-    /// app nothing reaches here). Pump thread, outside the sync lock.</summary>
-    private bool EndFightInProgress()
+    /// app nothing reaches here).
+    ///
+    /// The same call serves a source that is going away with nothing wrong
+    /// with it: removed by the user, or tailing when the app closes
+    /// (<paramref name="because"/> says which, for the report). Those two
+    /// lost the fight in the same way and for the same reason — no next
+    /// line was ever going to arrive — and the fight they leave is the
+    /// same cut-short fight: everything parsed up to the moment, ending at
+    /// its last recorded swing. SourceManager makes that call, after
+    /// <see cref="StopPump"/> and while the fight's consumers are still
+    /// attached.
+    ///
+    /// Takes the sync lock itself; the lock is reentrant, so a caller that
+    /// already holds it (SourceManager.Remove, to end the fight and detach
+    /// the consumers as one step) is fine. Otherwise the pump thread,
+    /// outside the lock.</summary>
+    internal bool EndFightInProgress(string because = "this source stopped")
     {
         var inFight = false;
         try
@@ -282,15 +342,17 @@ public sealed class LogSource : IDisposable
             CrashLog.Report(
                 "fight-consumer", ex,
                 $"Log source: {FileName}{Environment.NewLine}"
-                + $"Raised while the fight in progress was being ended because this source stopped.{Environment.NewLine}"
+                + $"Raised while the fight in progress was being ended because {because}.{Environment.NewLine}"
                 + "The fight is ended and in the session; a consumer of its announcement threw.",
-                // At most one per source: a source stops once.
+                // At most one per source: a source stops, is removed or
+                // sees the app close once.
                 always: true);
         }
         return inFight;
     }
 
-    private static string FightNote(bool endedFight) =>
+    /// <summary>What a journal line gains when a fight was ended with it.</summary>
+    internal static string FightNote(bool endedFight) =>
         endedFight ? "; its fight in progress was ended" : "";
 
     /// <summary>One tailed line through parse + processing, with the
@@ -450,7 +512,7 @@ public sealed class LogSource : IDisposable
         // Set last, for the same reason as the reader failure in PumpAsync:
         // whoever sees Error finds the evidence already written and the
         // fight already ended.
-        Error = stopped;
+        _stopped = new SourceStop(SourceStopReason.TooManyFailedLines, outcome.Consecutive, ex, stopped);
         return false;
     }
 
@@ -485,17 +547,49 @@ public sealed class LogSource : IDisposable
     private static string Quoted(string raw) =>
         raw.Length <= MaxQuotedLineChars ? raw : raw[..MaxQuotedLineChars] + "…";
 
+    /// <summary>How long <see cref="StopPump"/> waits for the pump to
+    /// finish the line it is on. The same two seconds Dispose has always
+    /// given it.</summary>
+    private static readonly TimeSpan PumpStopWait = TimeSpan.FromSeconds(2);
+
+    private bool _stopRequested;
+
+    /// <summary>Stop reading: cancel the pump and wait, at most
+    /// <see cref="PumpStopWait"/>, for it to finish the line it is on.
+    /// Returns whether it has finished. Once it has, no further line can
+    /// reach the engine, which is what lets the caller end the fight in
+    /// progress and know it stays ended. (If it has not, the caller ends
+    /// the fight all the same. A pump still running after two seconds is
+    /// in the middle of a large read batch, an import; a fight its later
+    /// lines open is not ended by anyone, which is where every fight in
+    /// progress stood before this method existed.)
+    ///
+    /// Separate from <see cref="Dispose"/> so that the wait can come
+    /// BEFORE the fight is ended and the consumers detached, and so it is
+    /// paid once: the first call waits, any later one (Dispose included)
+    /// only reports. Not for the pump thread. The caller must not hold the
+    /// sync lock — the pump needs it to finish its line.</summary>
+    public bool StopPump()
+    {
+        if (!_stopRequested)
+        {
+            _stopRequested = true;
+            _cts.Cancel();
+            try
+            {
+                _task?.Wait(PumpStopWait);
+            }
+            catch (AggregateException)
+            {
+                // Cancellation surfaces here; nothing to report on shutdown.
+            }
+        }
+        return _task?.IsCompleted ?? true;
+    }
+
     public void Dispose()
     {
-        _cts.Cancel();
-        try
-        {
-            _task?.Wait(TimeSpan.FromSeconds(2));
-        }
-        catch (AggregateException)
-        {
-            // Cancellation surfaces here; nothing to report on shutdown.
-        }
+        StopPump();
         _cts.Dispose();
     }
 }

@@ -188,7 +188,16 @@ public partial class App : Application
         // Join the folder watcher BEFORE persisting — a source discovered
         // mid-persist would lose its resume position.
         _manager?.StopFolderWatch();
+        // Stop reading BEFORE persisting as well. Dispose ends the fight
+        // each source is in and saves it, so the resume position written
+        // here has to be the last line that fight holds: a line read
+        // after the position was saved would be in tonight's fight and
+        // read again into the next session's first one.
+        _manager?.StopPumps();
         _manager?.PersistSources();
+        // Ends the fights in progress while their consumers are attached,
+        // then drains the archive writer — SourceManager.Dispose has the
+        // order and the bounds.
         _manager?.Dispose();
         // Last: a settings change made within the debounce window of
         // quitting still reaches disk.

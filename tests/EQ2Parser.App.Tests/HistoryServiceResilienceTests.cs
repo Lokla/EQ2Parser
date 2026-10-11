@@ -247,6 +247,88 @@ public sealed class HistoryServiceResilienceTests : IDisposable
     }
 
     [Fact]
+    public void An_Archive_Another_Connection_Holds_Locked_Costs_Seconds_Not_Half_A_Minute()
+    {
+        Session(Fight(1));
+        var before = File.ReadAllBytes(Db);
+
+        // Not an exclusive file handle (that fails at once, see above) but
+        // SQLite's own lock, held by another connection: the file opens,
+        // and its first statement answers "busy". The provider retries
+        // busy for the command timeout, which defaults to thirty seconds —
+        // on the UI thread, at startup, before any window.
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        using (var holder = new SqliteConnection($"Data Source={Db};Pooling=False"))
+        {
+            holder.Open();
+            using (var cmd = holder.CreateCommand())
+            {
+                cmd.CommandText = "PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE;";
+                cmd.ExecuteNonQuery();
+            }
+
+            using var history = new HistoryService();
+            clock.Stop();
+
+            Assert.Equal(ArchiveState.Unavailable, history.State);
+            Assert.False(history.IsAvailable);
+            var error = Assert.IsType<SqliteException>(history.OpenError);
+            Assert.Equal(5, error.SqliteErrorCode);
+            Assert.Null(history.QuarantinedPath);
+        }
+
+        // The bound is two seconds (HistoryStore.BusyTimeoutSeconds). The
+        // margin is for a slow machine, and still far from thirty.
+        Assert.True(clock.Elapsed < TimeSpan.FromSeconds(15), $"a locked archive held startup for {clock.Elapsed.TotalSeconds:0.0}s");
+        // Busy is about the moment, so the file is left exactly as it is…
+        Assert.Empty(QuarantinedFiles());
+        Assert.Equal(before, File.ReadAllBytes(Db));
+        Assert.Contains("archive UNAVAILABLE", Journal());
+        Assert.Contains("SqliteException 5", Journal());
+        // …and is the archive it was once the holder has let go.
+        using var later = new HistoryService();
+        Assert.Equal(ArchiveState.Healthy, later.State);
+        Assert.Equal("Lord Oak 1", Assert.Single(later.Search(null, null)).Title);
+    }
+
+    [Fact]
+    public async Task The_Writer_And_A_Searching_Thread_Never_See_Each_Other_As_Busy()
+    {
+        // The short busy bound must not make ordinary use flaky. Ordinary
+        // use is two threads on ONE connection behind the service's own
+        // lock: the background writer saving fights, and the UI thread
+        // searching (here a second thread, reading the archive as fast as
+        // it can for as long as the writer is busy). They queue on that
+        // lock, so SQLite never sees contention and the bound never comes
+        // into play — every save lands and no search throws.
+        const int fights = 60;
+        using var history = new HistoryService();
+        using var stop = new CancellationTokenSource();
+        var searching = Task.Run(() =>
+        {
+            var searches = 0;
+            while (!stop.IsCancellationRequested)
+            {
+                _ = history.Search(null, null);
+                _ = history.ArchivedZones();
+                searches++;
+            }
+            return searches;
+        });
+
+        for (var n = 1; n <= fights; n++)
+            history.QueueSave(Fight(n));
+        await WaitFor(() => history.Search(null, null).Count == fights, "every fight to be saved");
+        await stop.CancelAsync();
+
+        Assert.True(await searching > 0);
+        Assert.Equal(0, history.SaveFailures);
+        Assert.Null(history.LastSaveError);
+        Assert.Empty(Reports(HistoryService.SaveKind));
+        Assert.DoesNotContain("archive save FAILED", Journal());
+    }
+
+    [Fact]
     public void A_Healthy_File_Is_Untouched()
     {
         Session(Fight(1), Fight(2));

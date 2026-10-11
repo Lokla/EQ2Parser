@@ -9,6 +9,7 @@
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
         <Grid Margin="0,0,0,10">
@@ -98,7 +99,15 @@
             </ListBox>
         </Border>
 
-        <Grid Grid.Row="2" Margin="0,8,0,0">
+        <!-- Why there is no archive this session, or the operation that just
+             failed. Its own row so a long sentence can wrap; collapsed
+             when there is nothing to say. -->
+        <TextBlock Grid.Row="2" AutomationProperties.AutomationId="ArchiveNotice"
+                   Text="{Binding Notice}" TextWrapping="Wrap" Margin="0,8,0,0"
+                   Foreground="{StaticResource WarningBrush}" FontSize="12"
+                   Visibility="{Binding HasNotice, Converter={StaticResource BoolToVis}}" />
+
+        <Grid Grid.Row="3" Margin="0,8,0,0">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="*" />

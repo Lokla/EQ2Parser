@@ -10,6 +10,7 @@
 #   ./scripts/tools/ui-check.ps1 -Exe publish/EQ2Parser.App.exe -AllPages   # a published build
 #   ./scripts/tools/ui-check.ps1 -DataDir <copy of a data folder>           # reproduce on real state
 #   ./scripts/tools/ui-check.ps1 -Page Settings -Expect "v0.5.8"            # text that must be on screen
+#   ./scripts/tools/ui-check.ps1 -DataDir <dir> -AllowReport archive-quarantined   # a report the scenario provokes on purpose
 #   ./scripts/tools/ui-check.ps1 -Log <file> -Today                          # re-stamp the log to end a minute ago
 #   ./scripts/tools/ui-check.ps1 -Log <file> -Today -Select "Boss A|Boss B"   # select list items, then look
 #
@@ -46,6 +47,7 @@ param(
     [string]$DataDir,
     [switch]$KeepSources,
     [string[]]$Expect = @(),
+    [string[]]$AllowReport = @(),
     [string]$Out,
     [switch]$Offline,
     [switch]$Today,
@@ -62,6 +64,7 @@ $navKeys = @('Main', 'Sources', 'Triggers', 'Timers', 'Overlays', 'Settings')
 # texts in one argument are separated by a bar: -Select "Boss A|Boss B".
 $Select = @($Select | ForEach-Object { $_ -split '\|' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 $Expect = @($Expect | ForEach-Object { $_ -split '\|' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+$AllowReport = @($AllowReport | ForEach-Object { $_ -split '\|' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 $Page = @($Page | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 if ($AllPages) { $Page = $navKeys }
 if (-not $Out) { $Out = Join-Path $repo 'artifacts\ui-check' }
@@ -446,6 +449,15 @@ foreach ($want in $Expect) {
 }
 
 $newCrashes = @(Get-CrashFiles | Where-Object { $crashesBefore -notcontains $_.Name })
+# Some reports are the app doing its job (a damaged archive it set aside, a
+# log it could not read). A scenario that provokes one on purpose names the
+# kind, the last part of the file name, in -AllowReport.
+$expected = @($newCrashes | Where-Object {
+        $kind = $_.BaseName -replace '^crash-\d{4}-\d{2}-\d{2}_\d{6}-', '' -replace '-\d+$', ''
+        $AllowReport -contains $kind
+    })
+foreach ($e in $expected) { Write-Output "NOTE expected report written: $($e.Name)" }
+$newCrashes = @($newCrashes | Where-Object { $expected -notcontains $_ })
 if ($newCrashes.Count -gt 0) {
     $failed = $true
     Write-Output "FAIL crash ($($newCrashes.Count) crash report(s) written during the run)"

@@ -40,15 +40,56 @@ public sealed class SourceManager : IDisposable
     /// <summary>Per-source raid hook: cross-source dedup in front of the
     /// three raid consumers, so a dual-boxer's second log can't deliver
     /// the same game event twice.</summary>
-    private Action<string, DateTimeOffset> MakeRaidLineHandler(LogSource source) =>
-        (message, time) =>
+    private Action<string, DateTimeOffset> MakeRaidLineHandler(LogSource source)
+    {
+        // Built once per source, not per line.
+        Action<string, DateTimeOffset>[] consumers = [RaidRoster.OnLine, DkpProgress.OnLine, Loot.OnLine];
+        return (message, time) =>
         {
             if (!_raidDedup.ShouldProcess(source, message, time))
                 return;
-            RaidRoster.OnLine(message, time);
-            DkpProgress.OnLine(message, time);
-            Loot.OnLine(message, time);
+            RunRaidLineConsumers(message, time, consumers);
         };
+    }
+
+    /// <summary>Hand one raid line to every consumer, each in its own
+    /// guard, then report what failed. Run in sequence and unguarded, the
+    /// first to throw starved the ones after it: a fault in the roster
+    /// tracker cost that line's DKP confirmation and its loot entry too
+    /// (and each of them raises events into the Raid page, so "a fault" is
+    /// any subscriber's bug as well as the tracker's own).
+    ///
+    /// The failure is rethrown once all have run, not swallowed here. The
+    /// processor already contains a throw from this hook as a raid-line
+    /// alert fault, and that path is the one with the right evidence: a
+    /// log-alert report that quotes the line (a tracker that throws on one
+    /// particular line cannot be reproduced without it), the count in
+    /// LogSource.AlertFaults and the note on the Sources row. So the
+    /// isolation is the guard per consumer (as <see cref="Isolated"/> gives
+    /// the consumers of a finished fight) and the reporting stays where it
+    /// was. One failure is rethrown as itself, stack intact; several as one
+    /// AggregateException that carries them all.</summary>
+    internal static void RunRaidLineConsumers(
+        string message, DateTimeOffset time, params ReadOnlySpan<Action<string, DateTimeOffset>> consumers)
+    {
+        List<Exception>? faults = null;
+        foreach (var consumer in consumers)
+        {
+            try
+            {
+                consumer(message, time);
+            }
+            catch (Exception ex)
+            {
+                (faults ??= []).Add(ex);
+            }
+        }
+        if (faults is null)
+            return;
+        if (faults.Count == 1)
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(faults[0]).Throw();
+        throw new AggregateException("More than one raid-line consumer failed on this line.", faults);
+    }
 
     /// <summary>Raid loot accumulator (chest contents + who looted what) —
     /// feeds the Raid tab's loot list and the DKP purchase deductions.</summary>
@@ -324,11 +365,29 @@ public sealed class SourceManager : IDisposable
         }
     }
 
-    /// <summary>Add's exact inverse: unwire everything Add wired.</summary>
+    /// <summary>Add's exact inverse: unwire everything Add wired — after
+    /// ending the fight the source was in.
+    ///
+    /// A source removed mid-fight used to lose that fight: its handlers
+    /// were detached and its pump cancelled with the engine still in
+    /// combat, so nothing ever ended the encounter and it was neither
+    /// archived nor uploaded. The order below is what saves it:
+    ///  1. stop the pump (a bounded wait, two seconds — the wait Dispose
+    ///     always made, moved to the front), so no later line can reopen a
+    ///     fight;
+    ///  2. under the lock, end the fight WHILE the consumers are still
+    ///     attached — correlator, archive save, upload queue and raid
+    ///     roster each get it, in their usual guards — and only then
+    ///     detach them. One lock for both, so the two cannot be parted
+    ///     even if the pump did not stop in time.
+    /// The fight is not flagged: see <see cref="Dispose"/>.</summary>
     public void Remove(LogSource source)
     {
+        source.StopPump();
+        bool endedFight;
         lock (Sync)
         {
+            endedFight = source.EndFightInProgress("this source was removed");
             _sources.Remove(source);
             // The owner stays registered with the correlator, as it did
             // after Detach: history from that owner still needs the owner
@@ -345,6 +404,7 @@ public sealed class SourceManager : IDisposable
         if (source.TriggerEngine is { } engine)
             Triggers.RemoveEngine(engine);
         source.Dispose();
+        SessionJournal.Mark($"source removed: {System.IO.Path.GetFileName(source.Path)}{LogSource.FightNote(endedFight)}");
     }
 
     /// <summary>Feed a finished fight's player allies into the raid roster —
@@ -546,12 +606,78 @@ public sealed class SourceManager : IDisposable
         }
     }
 
+    /// <summary>Stop every source's pump and wait for each (up to 2 s
+    /// apiece, once: see <see cref="LogSource.StopPump"/>). Called on exit
+    /// BEFORE <see cref="PersistSources"/>, so the positions it saves are
+    /// final — a pump finishes the read batch it is on before it ends, so
+    /// once it has stopped, every line up to its position has been parsed
+    /// and none after it. <see cref="Dispose"/> calls it again, for a
+    /// manager disposed without the rest of the exit; that costs nothing.</summary>
+    public void StopPumps()
+    {
+        foreach (var source in Sources)
+            source.StopPump();
+    }
+
+    /// <summary>The app is closing. A fight in progress used to be lost
+    /// here: the pumps were cancelled with their engines still in combat,
+    /// and since the idle rule only runs when the next line arrives, the
+    /// last pull of the night was never ended — not archived, not uploaded.
+    ///
+    /// The order is the whole fix, and every wait in it is bounded:
+    ///  1. the folder watcher, joined (up to 3 s), so no source is added
+    ///     behind this;
+    ///  2. every pump, stopped (up to 2 s each, the wait their Dispose
+    ///     always made), so no later line can reopen a fight;
+    ///  3. every fight in progress, ended through the engine's normal path
+    ///     under the lock. The consumers are all still attached — nothing
+    ///     here detaches them — so the correlator, the archive queue, the
+    ///     upload queue and the raid roster each receive it exactly as
+    ///     they do a fight the idle rule ended;
+    ///  4. the sources, disposed (no further wait: step 2 made it);
+    ///  5. the archive, which completes its queue and gives its writer up
+    ///     to 5 s to drain it before the exit snapshot. The fight from
+    ///     step 3 is in that queue, so it is in history.db — and in the
+    ///     snapshot — unless the writer was more than five seconds behind
+    ///     (a large import just before closing), which the journal then
+    ///     says in so many words;
+    ///  6. the uploads, which cancel their drain and wait up to 2 s. The
+    ///     queue is in memory and the cancel comes as soon as the archive
+    ///     has closed, so the upload of that last fight may well NOT
+    ///     complete (it has had only as long as step 5 took). That is
+    ///     accepted: the fight is in the archive, and the fight tree's
+    ///     upload item sends an archived fight later.
+    /// No new wait was added to the exit; steps 2 and 3 are the old step
+    /// "dispose the sources" taken apart.
+    ///
+    /// The fight is not flagged as cut short, here or when a source is
+    /// removed. It is the same fight a link-death or a camp-out mid-pull
+    /// leaves — everything parsed up to the last line, ending at its last
+    /// recorded swing — and the idle rule has always ended and saved those
+    /// unmarked; so does a source that stops on an error. Its numbers are
+    /// computed exactly as any fight's are. A mark would have to travel in
+    /// the upload payload and be stored by the site and by the archive's
+    /// schema to mean anything, which is a change to the contract with
+    /// the site, not to this method. What is recorded is the evidence: the
+    /// journal line below, and "source removed" for a removal.</summary>
     public void Dispose()
     {
         // Stop the folder watcher FIRST and join it — it could otherwise
         // Add a source concurrently with (or after) this teardown.
         StopFolderWatch();
-        foreach (var source in Sources)
+        StopPumps();
+        var sources = Sources;
+        List<string>? ended = null;
+        foreach (var source in sources)
+        {
+            if (source.EndFightInProgress("the app is closing"))
+                (ended ??= []).Add(System.IO.Path.GetFileName(source.Path));
+        }
+        // File names only, as "source added" has them. It says ended, not
+        // saved: the archive reports its own side (see step 5).
+        if (ended is not null)
+            SessionJournal.Mark($"exit: fight in progress ended — {string.Join(", ", ended)}");
+        foreach (var source in sources)
             source.Dispose();
         History.Dispose();
         Uploads.Dispose();

@@ -523,6 +523,198 @@ public sealed class LogSourceFaultIsolationTests : IDisposable
         Assert.Contains("alert handler FAILED: eq2log_Tester.txt — raid line", Journal());
     }
 
+    // ── Why it stopped, as facts: shown in the interface language ───────────
+
+    [Fact]
+    public void A_Source_Stopped_By_The_Breaker_Says_Why_In_Facts_And_Keeps_Its_English_Evidence()
+    {
+        using var source = Source();
+        Assert.Null(source.Stopped);
+
+        for (var i = 0; i < LineFaultBreaker.DefaultTripAfter; i++)
+            source.PumpLine(Tailed(Poison));
+
+        var stopped = source.Stopped;
+        Assert.NotNull(stopped);
+        Assert.Equal(SourceStopReason.TooManyFailedLines, stopped.Reason);
+        Assert.Equal(LineFaultBreaker.DefaultTripAfter, stopped.FailedLines);
+        Assert.IsType<InvalidOperationException>(stopped.Cause);
+        Assert.Equal("line handling broke", stopped.Cause.Message);
+        // The exception, and so the crash report made from it, is what it
+        // was: English, whatever the interface language.
+        Assert.Same(source.Error, stopped.Error);
+        Assert.Same(stopped.Cause, stopped.Error.InnerException);
+        const string english = "stopped after 200 lines in a row failed to process — last: InvalidOperationException: line handling broke";
+        Assert.Equal(english, source.Error!.Message);
+        LocTestHost.In("de", () =>
+        {
+            Assert.Equal(english, source.Error!.Message);
+            // The row says it in German, with the exception's own words
+            // as they came.
+            Assert.Equal(
+                "Fehler: angehalten, nachdem 200 Zeilen in Folge nicht verarbeitet werden konnten — zuletzt: InvalidOperationException: line handling broke",
+                SourcesViewModel.StatusFor(source));
+        });
+        Assert.Contains(english, File.ReadAllText(Assert.Single(Reports("log-source-stopped"))));
+        Assert.Equal("error: " + english, SourcesViewModel.StatusFor(source));
+        foreach (var language in new[] { "en", "de", "fr", "ru" })
+        {
+            LocTestHost.In(language, () =>
+            {
+                var status = SourcesViewModel.StatusFor(source);
+                Assert.DoesNotContain("Sources_", status);
+                Assert.Contains("200", status);
+                // The type and the message as they came (French sets a
+                // space before the colon between them).
+                Assert.Contains("InvalidOperationException", status);
+                Assert.EndsWith(": line handling broke", status);
+                if (language != "en")
+                    Assert.DoesNotContain("stopped after", status);
+            });
+        }
+    }
+
+    [Fact]
+    public async Task A_Source_Stopped_By_A_Reader_Failure_Says_So_In_The_Interface_Language()
+    {
+        var path = _dir.FileIn("eq2log_Tester.txt");
+        await File.WriteAllLinesAsync(path, [Hit(0), Hit(1)]);
+        using var locker = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete);
+        locker.Lock(0, locker.Length);
+        using var source = Source();
+
+        source.Start();
+        await WaitFor(() => source.Error is not null);
+
+        var stopped = source.Stopped;
+        Assert.NotNull(stopped);
+        Assert.Equal(SourceStopReason.ReaderFailed, stopped.Reason);
+        Assert.Equal(0, stopped.FailedLines);
+        Assert.Same(source.Error, stopped.Cause);
+        Assert.Same(source.Error, stopped.Error);
+        // English is the row it always was: the prefix and the exception's
+        // own message.
+        Assert.Equal("error: " + source.Error!.Message, SourcesViewModel.StatusFor(source));
+        // Another language says what happened in its own words; the
+        // exception's message follows as it came.
+        LocTestHost.In("de", () => Assert.Equal(
+            "Fehler: Das Log konnte nicht gelesen werden — " + source.Error!.Message,
+            SourcesViewModel.StatusFor(source)));
+        locker.Unlock(0, locker.Length);
+    }
+
+    // ── Alert faults on the Sources row ─────────────────────────────────────
+
+    [Fact]
+    public void The_Sources_Row_Counts_Alert_Faults_Without_Calling_Anything_Skipped()
+    {
+        using var source = SourceWithBrokenAlertHandler();
+        source.PumpLine(Tailed(Hit(0)));
+        // No fault yet: the row is exactly the counters.
+        Assert.Equal("1 lines · 1 matched · 1 encounters · IN COMBAT", SourcesViewModel.StatusFor(source));
+
+        source.PumpLine(Tailed(RaidHit(1)));
+        source.PumpLine(Tailed(RaidHit(2)));
+
+        // Before: these two faults were in the crashes folder and nowhere
+        // on screen. Both lines were parsed, and the row says that too.
+        Assert.Equal(2, source.AlertFaults);
+        Assert.Equal(
+            "3 lines · 3 matched · 1 encounters · IN COMBAT · alert errors: 2 (last: InvalidOperationException) — numbers unaffected, see the crashes folder",
+            SourcesViewModel.StatusFor(source));
+        LocTestHost.In("de", () => Assert.Equal(
+            "Zeilen: 3 · erkannt: 3 · Kämpfe: 1 · IM KAMPF · Alarm-Fehler: 2 (zuletzt: InvalidOperationException) — Zahlen nicht betroffen, siehe den Ordner „crashes“",
+            SourcesViewModel.StatusFor(source)));
+        foreach (var language in new[] { "fr", "ru" })
+        {
+            LocTestHost.In(language, () =>
+            {
+                var status = SourcesViewModel.StatusFor(source);
+                Assert.DoesNotContain("Sources_", status);
+                Assert.Contains("InvalidOperationException", status);
+            });
+        }
+
+        // After the skipped-lines note when a source has both.
+        source.PumpLine(Tailed(Poison));
+        Assert.EndsWith(
+            " · 1 skipped on error (last: InvalidOperationException) — see the crashes folder"
+            + " · alert errors: 2 (last: InvalidOperationException) — numbers unaffected, see the crashes folder",
+            SourcesViewModel.StatusFor(source));
+    }
+
+    // ── A stopped source has no pending work ────────────────────────────────
+
+    [Fact]
+    public void A_Stopped_Source_Reports_No_Pending_Bytes_However_Far_Its_Log_Runs_Ahead()
+    {
+        var path = _dir.FileIn("eq2log_Tester.txt");
+        File.WriteAllText(path, new string('x', 2_000_000));
+        using var source = Source();
+        // Tailing, and behind: that is real pending work.
+        Assert.True(source.PendingBytes > 1_000_000);
+
+        for (var i = 0; i < LineFaultBreaker.DefaultTripAfter; i++)
+            source.PumpLine(Tailed(Poison));
+        Assert.NotNull(source.Error);
+
+        // Before: 2,000,000 and growing with every line the game wrote,
+        // for the rest of the session — nobody will ever read those bytes.
+        Assert.Equal(0, source.PendingBytes);
+        File.AppendAllText(path, new string('y', 500_000));
+        Assert.Equal(0, source.PendingBytes);
+    }
+
+    // ── A source that is going away: stop, then end the fight ───────────────
+
+    [Fact]
+    public async Task A_Stopped_Pump_Reads_No_Further_And_Its_Fight_Can_Be_Ended_Exactly_Once()
+    {
+        var path = _dir.FileIn("eq2log_Tester.txt");
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        await File.WriteAllLinesAsync(path, [Hit(0, from: now), Hit(1, from: now)]);
+        using var source = Source();
+        var announced = 0;
+        source.Engine.EncounterEnded += _ => announced++;
+        source.Start();
+        await WaitFor(() => source.Processor.LinesMatched >= 2);
+        Assert.True(source.Engine.InCombat);
+
+        Assert.True(source.StopPump());
+        // The log goes on growing, as it does while the game runs. A pump
+        // that has stopped reads none of it, so the fight cannot reopen.
+        await File.AppendAllLinesAsync(path, [Hit(2, from: now), Hit(3, from: now)]);
+        Assert.True(source.StopPump()); // asking again neither waits nor throws
+
+        Assert.True(source.EndFightInProgress("the app is closing"));
+        Assert.False(source.EndFightInProgress("the app is closing"));
+
+        Assert.Equal(1, announced);
+        Assert.False(source.Engine.InCombat);
+        var fight = Assert.Single(source.Engine.History);
+        Assert.False(fight.Active);
+        Assert.Equal(1000, fight.Combatants["TESTER"].Damage);
+        Assert.Equal(2, source.Processor.LinesMatched);
+        // Nothing went wrong, so nothing says it did.
+        Assert.Null(source.Error);
+        Assert.Empty(Reports("fight-consumer"));
+    }
+
+    [Fact]
+    public void A_Consumer_That_Throws_While_A_Closing_Source_Ends_Its_Fight_Is_Reported_With_The_Reason()
+    {
+        using var source = Source();
+        source.Engine.EncounterEnded += static _ => throw new InvalidOperationException("subscriber broke");
+        Assert.True(source.PumpLine(Tailed(Hit(0))));
+
+        Assert.True(source.EndFightInProgress("the app is closing"));
+
+        Assert.False(source.Engine.InCombat);
+        Assert.False(Assert.Single(source.Engine.History).Active);
+        var report = File.ReadAllText(Assert.Single(Reports("fight-consumer")));
+        Assert.Contains("because the app is closing.", report);
+    }
+
     private static async Task WaitFor(Func<bool> condition)
     {
         var deadline = DateTime.UtcNow.AddSeconds(10);

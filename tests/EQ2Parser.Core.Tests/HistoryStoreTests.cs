@@ -834,4 +834,86 @@ public sealed class HistoryStoreTests : IDisposable
         Assert.Equal("wal", File.ReadAllText(path + "-wal"));
         Assert.Empty(Directory.GetFiles(_dir, "history.db.corrupt-*"));
     }
+
+    // ---- a database someone else holds locked ----
+    //
+    // The provider retries a busy database until the command's timeout runs
+    // out, and that timeout defaults to 30 seconds. The store opens on the
+    // UI thread during startup, so a held lock was half a minute of nothing
+    // on screen before the app gave up and ran without an archive.
+
+    /// <summary>A second connection that keeps the whole database to
+    /// itself, the way another process holding it does: exclusive locking
+    /// mode plus an open exclusive transaction, so every other connection's
+    /// first statement answers SQLITE_BUSY for as long as this is open.</summary>
+    private static Microsoft.Data.Sqlite.SqliteConnection HoldExclusively(string path)
+    {
+        var holder = new Microsoft.Data.Sqlite.SqliteConnection(
+            new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder { DataSource = path, Pooling = false }.ToString());
+        holder.Open();
+        using var cmd = holder.CreateCommand();
+        cmd.CommandText = "PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE;";
+        cmd.ExecuteNonQuery();
+        return holder;
+    }
+
+    [Fact]
+    public void A_Database_Held_Locked_Fails_To_Open_As_Busy_Within_The_Bound()
+    {
+        var path = Path.Combine(_dir, "history.db");
+        using (var store = new HistoryStore(path))
+            store.SaveEncounter(BuildEncounter());
+
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        Microsoft.Data.Sqlite.SqliteException error;
+        using (HoldExclusively(path))
+        {
+            error = Assert.Throws<Microsoft.Data.Sqlite.SqliteException>(() => new HistoryStore(path));
+            clock.Stop();
+        }
+
+        // Busy, which is about the moment: the file is not called damaged,
+        // so the app leaves it alone.
+        Assert.Equal(5, error.SqliteErrorCode);
+        Assert.False(HistoryStore.IsDamagedFile(error));
+        // The bound itself is two seconds. The assertion leaves a slow
+        // machine a wide margin and still fails on the provider's default,
+        // which is thirty.
+        Assert.True(
+            clock.Elapsed < TimeSpan.FromSeconds(15),
+            $"opening a locked database took {clock.Elapsed.TotalSeconds:0.0}s; the bound is {HistoryStore.BusyTimeoutSeconds}s");
+        Assert.Equal(2, HistoryStore.BusyTimeoutSeconds);
+
+        // Once the holder lets go the file opens as it always did, with
+        // everything in it.
+        using var later = new HistoryStore(path);
+        Assert.Single(later.QueryEncounters());
+    }
+
+    [Fact]
+    public void A_Statement_That_Runs_Longer_Than_The_Busy_Bound_Is_Not_Cut_Short()
+    {
+        // The bound limits how long a statement WAITS for a lock, never how
+        // long it may run: an archive search over years of fights can take
+        // longer than two seconds and must still answer. A connection built
+        // from the store's own connection string runs a statement that
+        // sleeps past the bound, with nobody else holding anything.
+        var path = Path.Combine(_dir, "history.db");
+        using (var store = new HistoryStore(path))
+            store.SaveEncounter(BuildEncounter());
+        using var conn = new Microsoft.Data.Sqlite.SqliteConnection(HistoryStore.ConnectionString(path));
+        conn.Open();
+        Assert.Equal(HistoryStore.BusyTimeoutSeconds, conn.DefaultTimeout);
+        var calls = 0;
+        conn.CreateFunction("slow_step", () =>
+        {
+            Thread.Sleep(TimeSpan.FromSeconds(HistoryStore.BusyTimeoutSeconds + 1));
+            return ++calls;
+        });
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT slow_step() FROM encounters LIMIT 1;";
+
+        Assert.Equal(1L, cmd.ExecuteScalar());
+        Assert.Equal(1, calls);
+    }
 }

@@ -74,9 +74,54 @@ public sealed class HistoryStore : IDisposable
     /// process) and costs the two things this class promises: a store that
     /// failed to open has let go of the file, and a finished snapshot can
     /// be renamed into place. Built with the builder so a path containing
-    /// ";" or "=" is still one path.</summary>
-    private static string ConnectionString(string path) =>
-        new SqliteConnectionStringBuilder { DataSource = path, Pooling = false }.ToString();
+    /// ";" or "=" is still one path.
+    ///
+    /// The default timeout is <see cref="BusyTimeoutSeconds"/>, which see.
+    /// Public so a test can open a connection exactly as the store does.</summary>
+    public static string ConnectionString(string path) =>
+        new SqliteConnectionStringBuilder { DataSource = path, Pooling = false, DefaultTimeout = BusyTimeoutSeconds }.ToString();
+
+    /// <summary>How long any one statement waits for a database somebody
+    /// else holds locked before it fails with SQLITE_BUSY (result code 5).
+    ///
+    /// What it bounds. The provider answers a busy or locked database by
+    /// retrying the statement until the command's timeout has passed, and
+    /// a command takes its timeout from the connection's default, which is
+    /// THIRTY seconds unless the connection string says otherwise. That
+    /// default is what governs the open as well (measured: a store opened
+    /// against a file another connection held exclusively failed after
+    /// 30.0 s before this was set and after 2 s with it), so the
+    /// connection string is the one place the bound has to be set; a
+    /// busy_timeout pragma would only add a second clock. The store is
+    /// opened on the UI thread during startup, so a file held by another
+    /// process used to be half a minute of nothing on screen before the
+    /// app gave up and ran without an archive. It limits waiting only: a
+    /// statement that RUNS for longer is never cut short.
+    ///
+    /// Why two seconds is safe. Inside this process the bound never comes
+    /// into play at all. The app has ONE connection to the archive, and
+    /// its two users — the background writer saving finished fights, and
+    /// the UI thread searching, loading and purging — take the service's
+    /// own lock around every call, so they queue on that lock and SQLite
+    /// never sees two of them at once. (The exit snapshot opens a second
+    /// connection, but to a different file.) The bound is therefore about
+    /// OTHER processes only: a second copy of the app on the same data
+    /// folder, whose write transactions are one fight each and take
+    /// milliseconds, so the retries inside two seconds clear them with
+    /// room to spare; or a backup, sync or antivirus tool, which either
+    /// lets go in well under two seconds or holds the file for far longer
+    /// than thirty.
+    ///
+    /// What it costs. A lock held for between two and thirty seconds used
+    /// to be waited out and now fails the statement: at startup the session
+    /// runs without an archive (the file untouched, the next start tries
+    /// again), and mid-session a save is counted as failed. Both are
+    /// reported and shown. The wait it replaces was not free either: the
+    /// writer waits while holding the service's lock, and the log pump
+    /// takes that lock for the archive collapse while it holds the lock
+    /// every view needs, so thirty seconds of busy was thirty seconds of a
+    /// frozen app per fight.</summary>
+    public const int BusyTimeoutSeconds = 2;
 
     private int StoredVersion()
     {

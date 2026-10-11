@@ -40,23 +40,32 @@ statement of `App.OnStartup`.
 | `fatal-startup` | An exception during startup: inside `App.Start` (run by `App.OnStartup`), or while `Program.Main` builds the `App` | "EQ2Parser could not start and has to close." | Exits with code 71 (`App.StartupFailureExitCode`) |
 | `background-task` | A faulted task nobody awaited | Nothing | Keeps running |
 | `log-line` | Processing one log line threw (`LogSource.PumpLine`) | Nothing; the Sources row gains `N skipped on error` | Keeps running; the line is skipped and the source reads on |
-| `log-alert` | An alert handler threw while a line was processed: triggers, trigger share, raid line, status callout or spell timers (`LogLineProcessor.AlertFaulted`, reported by `LogSource`) | Nothing. An alert may not have fired | Keeps running; the line was still parsed, nothing is skipped and the source cannot stop for it |
-| `log-source-stopped` | 200 lines in a row failed for one source (`LineFaultBreaker.DefaultTripAfter`) | Nothing; the Sources row reads `error: stopped after 200 lines in a row failed to process ...` | Keeps running; that source has stopped, after ending its fight in progress (announced like any finished fight) |
-| `log-reader` | The tail reader itself failed, for example an IO error mid-read | Nothing; the Sources row reads `error: <message>` | Keeps running; that source has stopped, after ending its fight in progress (announced like any finished fight) |
-| `fight-consumer` | One consumer of a finished fight threw (`SourceManager.Isolated`: correlator, archive save, upload, raid roster, archive collapse). Also written by `LogSource` when a consumer throws on the fight a stopping source ends | Nothing | Keeps running; the other consumers still ran |
-| `archive-quarantined` | `history.db` was damaged at startup and was renamed aside (`HistoryService`) | Nothing yet (see the note below the table) | Keeps running on a fresh, empty archive; nothing was deleted |
-| `archive-unavailable` | `history.db` could not be opened at startup and was left alone | Nothing yet | Keeps running WITHOUT an archive; no fight of the session is saved |
-| `archive-restore` | The startup restore could not list the recent fights, or could not load some of them | Nothing; those fights are missing from the tree | Keeps running; the other fights were restored |
-| `archive-save` | Saving a finished fight to the archive failed | Nothing | Keeps running; that fight is not in the archive |
+| `log-alert` | An alert handler threw while a line was processed: triggers, trigger share, raid line, status callout or spell timers (`LogLineProcessor.AlertFaulted`, reported by `LogSource`) | No dialog; the Sources row ends `alert errors: N (last: <exception type>) — numbers unaffected, see the crashes folder`. An alert may not have fired | Keeps running; the line was still parsed, nothing is skipped and the source cannot stop for it |
+| `log-source-stopped` | 200 lines in a row failed for one source (`LineFaultBreaker.DefaultTripAfter`) | No dialog; the Sources row reads `error: stopped after 200 lines in a row failed to process — last: <type>: <message>` (that sentence in the interface language) | Keeps running; that source has stopped, after ending its fight in progress (announced like any finished fight) |
+| `log-reader` | The tail reader itself failed, for example an IO error mid-read | No dialog; the Sources row reads `error: <message>` (in another language, "the log could not be read", then the message) | Keeps running; that source has stopped, after ending its fight in progress (announced like any finished fight) |
+| `fight-consumer` | One consumer of a finished fight threw (`SourceManager.Isolated`: correlator, archive save, upload, raid roster, archive collapse). Also written by `LogSource` when a consumer throws on the fight a source ends as it goes away; the report says which: `because this source stopped`, `because this source was removed` or `because the app is closing` | Nothing | Keeps running; the other consumers still ran |
+| `archive-quarantined` | `history.db` was damaged at startup and was renamed aside (`HistoryService`) | No dialog; a warning strip under the tab bar for the whole session, naming the file the old archive was renamed to | Keeps running on a fresh, empty archive; nothing was deleted |
+| `archive-unavailable` | `history.db` could not be opened at startup and was left alone | No dialog; the warning strip says fights are not being saved, and the Archive window says the same in place of its result line | Keeps running WITHOUT an archive; no fight of the session is saved |
+| `archive-restore` | The startup restore could not list the recent fights, or could not load some of them | No dialog; the warning strip gives the count; those fights are missing from the tree | Keeps running; the other fights were restored |
+| `archive-save` | Saving a finished fight to the archive failed | No dialog; the warning strip gives the running count | Keeps running; that fight is not in the archive |
 | `archive-backup` | The exit snapshot of the archive failed | Nothing | Exits normally; `history.db` and the earlier backups are untouched |
+| `archive-window` | A search, a load or a purge in the Archive window threw (`ArchiveViewModel`) | No dialog; one line under the list, such as `The archive could not be searched (SqliteException 5).` | Keeps running; the list is left as it was |
 
 All from `log-line` down are failures the app caught where they happened and reported through
-`CrashLog.Report`. Builds up to v0.5.7 have none of them, nor `fatal-startup`. The five
+`CrashLog.Report`. Builds up to v0.5.7 have none of them, nor `fatal-startup`. The
 `archive-` kinds and `log-alert` are newer still: builds without them fail startup on an
 unopenable archive, swallow a failed save without a word, and skip the whole line when an
-alert handler throws. The two startup `archive-` kinds have no on-screen notice yet;
-`HistoryService.Problem` holds the text for one. `references/app-data.md` has the archive
-states.
+alert handler throws.
+
+The warning strip is the one place a user sees an archive problem
+(`src/EQ2Parser.App/ViewModels/ArchiveNotice.cs`, polled by `MainViewModel.Tick`). It is on
+every page, shows only while there is a problem, and is in the interface language; the only
+English in it is the exception's kind in brackets (`SqliteException 5`), which matches the
+journal line. A tester's screenshot of it says which of the archive states they are in. The
+first build with the archive kinds had no strip, and the Archive window there showed
+"Nothing found." for an archive that had not been opened, and put up the "unexpected error"
+dialog (kind `ui-thread`) when an archive operation threw. `references/app-data.md` has the
+archive states.
 
 Layout of each file:
 
@@ -67,8 +76,8 @@ Layout of each file:
    (its first 300 characters) for `log-line` and `log-source-stopped`; the stage, the fault
    count and the line for `log-alert`, under a sentence saying no combat data is missing; the
    consumer name for `fight-consumer`; for the `archive-` kinds what happened to the file in
-   plain words (the quarantined file's name, "left exactly as it is"), and for `archive-save`
-   the fight's title and zone.
+   plain words (the quarantined file's name, "left exactly as it is"), for `archive-save`
+   the fight's title and zone, and for `archive-window` which operation failed.
 4. `Exception.ToString()`: type, message, inner exceptions, stack trace.
 
 What a crash file does NOT contain: what the user was doing or any setting. A `log-line`,
@@ -83,7 +92,8 @@ Reading traps:
 - **One file per five seconds.** Reports closer together than that are dropped, except the
   ones that always land: `fatal`, `crash-loop`, `fatal-startup`, `log-source-stopped`,
   `log-reader`, `archive-quarantined`, `archive-unavailable`, `archive-restore`, and the
-  `fight-consumer` report of a stopping source. A crash loop therefore usually leaves one
+  `fight-consumer` report of a source that stops, is removed or is tailing when the app
+  closes. A crash loop therefore usually leaves one
   `ui-thread` file and one `crash-loop` file a moment later, and the three exceptions between
   them are gone. If the two differ, there were at least two faults.
 - **Five `log-line` reports per source per session** (`MaxLineReports` in `LogSource`).
@@ -145,6 +155,7 @@ Each line is `[yyyy-MM-dd HH:mm:ss.fff] <text>`, local time. What gets written:
 | `startup complete — window shown, overlays restored` | The end of startup (`App.Start`) |
 | `startup FAILED (<exception type>) — exiting with code 71` | Startup threw; `App.FailStartup` is ending the process |
 | `source added: <log file name>` | A log started being tailed. The file name contains the character name |
+| `source removed: <log file name>` | A log was removed from Sources (by hand, or with its watched folder). Ends `; its fight in progress was ended` when it was in combat: that fight was announced and saved, cut short |
 | `log line skipped: <log file name> — <exception type> (<n> skipped this session)` | A line threw and was skipped. Written for the first one, then at most once per ten seconds per source (`LineFaultBreaker.JournalInterval`); `<n>` is the running total |
 | `alert handler FAILED: <log file name> — <stage> (<exception type>, <n> this session); the line was still parsed` | An alert handler threw and was contained. `<stage>` is `triggers`, `trigger share`, `raid line`, `status callout` or `spell timers`. Written for the first one, then at most once per ten seconds per source; `<n>` is the running total |
 | `source STOPPED: <log file name> — <n> lines in a row failed (<exception type>, <n> skipped this session)` | 200 consecutive lines failed; that source reads no further. Ends `; its fight in progress was ended` when it was in combat: that fight was announced and saved, cut short |
@@ -152,7 +163,8 @@ Each line is `[yyyy-MM-dd HH:mm:ss.fff] <text>`, local time. What gets written:
 | `fight consumer FAILED: <consumer> (<exception type>, <n> this session)` | One consumer of a finished fight threw. Written for the first ten, then every hundredth |
 | `archive save FAILED: <type and SQLite code> (<n> this session) — the fight was parsed but is not in history.db` | A save to the archive failed. Written for the 1st, 10th, 100th, 1,000th failure; `<n>` is the running total |
 | `archive: <n> fight saves failed this session (last: <type and SQLite code>)` | Written at exit when more than one save failed: the total the sparse lines above cannot give |
-| `archive: exit did not wait for <n> queued fight saves — not in history.db` | The exit gave the archive writer five seconds and it was still busy (a large import just before closing). Those fights were dropped, not failed |
+| `exit: fight in progress ended — <log file names>` | The app was closed mid-fight. Each named log's fight was ended, announced and queued for the archive, cut short at its last line. Written after `exit begin` |
+| `archive: exit did not wait for <n> queued fight saves — not in history.db` | The exit gave the archive writer five seconds and it was still busy (a large import just before closing). Those fights were dropped, not failed. A fight ended by the exit is last in that queue, so with this line it was probably one of them |
 | `archive: exit backup FAILED (<type>) — the archive is unaffected, earlier backups were kept` | The exit snapshot could not be written |
 | `raid file synced: <name> (<n> chars)` / `raid file sync FAILED: <name> (<exception type>)` | A raid command file write |
 | `tts synthesis (sherpa-onnx native)` | About to call the native speech engine; at most one line per ten seconds |
@@ -317,8 +329,14 @@ These fail quietly. Absence of a crash file says nothing about them.
   the stores); only the in-memory state changes. A failed ARCHIVE save used to be on this
   list. It now leaves an `archive-save` report and a journal line: see `app-data.md`,
   "The archive".
-- **A fight in progress when the app is closed.** A clean exit does not end it, so it is
-  not saved or uploaded. (A source that STOPS on an error does end its fight.)
+- **A fight in progress when the app is closed, on builds without the
+  `exit: fight in progress ended` journal line.** There a clean exit did not end it, so it
+  was neither saved nor uploaded, and removing a log mid-fight lost its fight the same way.
+  The current build ends it: see "A fight in progress when its source goes away" below.
+- **The upload of a fight ended by the exit.** The upload queue is in memory, and the exit
+  cancels it as soon as the archive has closed, so that one upload may well not happen.
+  Nothing records it either way: check the site. The fight is in the archive, comes back into the tree at the next start, and uploads
+  from its "Upload to EQ2Lexicon" item. A fight ended by REMOVING a log uploads normally.
 - **Upload and update failures.** Status lines on the Settings page only
   (`UploadQueue.Status`, `UpdateService.Status`). Ask for the exact text or a screenshot.
 
@@ -334,11 +352,23 @@ out which of three things happened. The Sources page row and the `crashes` folde
 | The normal counters, still rising, ending `· N skipped on error (last: <exception type>) — see the crashes folder` | `crash-*-log-line.txt` (at most five per source per session, and none within five seconds of another report); `log line skipped: ...` in `session.log` | N lines threw and were dropped. The source is alive. The user's complaint is missing numbers, not a stopped log |
 | `error: stopped after 200 lines in a row failed to process — last: <type>: <message>` | `crash-*-log-source-stopped.txt`; `source STOPPED: ... lines in a row failed` in `session.log`; usually `log-line` reports from just before | Every line was failing, which is a structural fault and not one bad line. That source reads nothing more this session |
 | `error: <message>` that does not begin `stopped after` | `crash-*-log-reader.txt`; `source STOPPED: ... the log reader failed` in `session.log` | The reader failed mid-read (an IO error: a locked range, a drive that went away). That source reads nothing more this session |
-| The normal counters, nothing about skips | `crash-*-log-alert.txt` (at most five per source per session); `alert handler FAILED: ...` in `session.log` | An alert handler threw on some lines. Every line was still parsed: no number is missing, but a trigger, timer, callout or roster update may not have happened. The row does not show these yet; `LogSource.AlertFaults` has the count |
+| The normal counters, ending `· alert errors: N (last: <exception type>) — numbers unaffected, see the crashes folder` | `crash-*-log-alert.txt` (at most five per source per session); `alert handler FAILED: ...` in `session.log` | An alert handler threw N times. Every line was still parsed: no number is missing, but a trigger, timer, callout or roster update may not have happened. Builds without that ending show the normal counters only; there `LogSource.AlertFaults` has the count and the crashes folder the evidence |
 
-`LogSource.Error` is set only when the source has STOPPED; `LogSource.SkippedLines` and
+Those are the English rows. In German, French or Russian the same row is worded in that
+language (`SourcesViewModel.StatusFor` builds it from `LogSource.Stopped`, never from the
+exception's message), so match a tester's screenshot on what does not change: the number,
+the exception type, and the exception's own message at the end. On builds before that, the
+row was the translated "error:" followed by the English sentence.
+
+`LogSource.Error` is set only when the source has STOPPED, and `LogSource.Stopped` says which
+way (the reader, or the breaker and after how many lines); `LogSource.SkippedLines` and
 `LastLineError` carry the skips. Nothing restarts a stopped source, and because it is still
-in the list the folder watcher will not re-add it.
+in the list the folder watcher will not re-add it. A stopped source reports no pending bytes
+(`LogSource.PendingBytes`). On builds before that, its unread log counted as import backlog:
+once the game had written a megabyte past the stop, `SourceManager.ImportBusy` stayed true,
+the Main page refreshed every two seconds and the mini-parse overlays showed "Importing
+history…" for every source until restart. "Everything went sluggish after one log errored"
+is that.
 
 **A stopped source ends its fight.** Before `Error` is set, the source ends the fight it was
 in through the engine's normal path (`LogSource.EndFightInProgress`), so the fight reaches
@@ -349,6 +379,30 @@ before the stop and nothing invented, and it lacks the lines that failed or were
 read. So "the last pull of the night is short on every number, for one character" plus a
 `source STOPPED` line is this, not a grammar bug. Builds without that journal ending left
 the fight active instead: never saved, never uploaded.
+
+**A fight in progress when its source goes away.** Two more things leave a source with a
+fight and no next line to end it: the user removes the log from Sources, or closes the app.
+Both end the fight through the same call, with the order doing the work
+(`SourceManager.Remove`, `SourceManager.Dispose`): the pump is stopped first, with a wait of
+at most two seconds (`LogSource.StopPump`); the fight is ended while the correlator, the
+archive queue, the upload queue and the raid roster are still attached; only then are the
+handlers detached (removal) or the services disposed (exit). On exit the pumps stop before
+the resume positions are saved, so the next session starts on the line after that fight,
+and the archive's own five-second wait for its writer is what puts the fight in
+`history.db` before the process ends. No wait was added to the exit.
+
+- Evidence: `source removed: <file>; its fight in progress was ended`, or
+  `exit: fight in progress ended — <files>`, in `session.log`. `archive: exit did not wait
+  for <n> queued fight saves` after the second one means the save did not make it.
+- The fight is cut short, like a stopped source's, and carries no mark saying so: it is the
+  fight a link-death mid-pull leaves, and those have always been saved unmarked. So "the
+  last pull is short on every number" plus one of those journal lines is this.
+- If the game was still in the fight when the app closed, the next session reads the rest
+  of it as a NEW fight starting at the resume position. Two fragments of one pull, either
+  side of a restart, is expected.
+- The upload of a fight ended by the exit may well not happen (see "What leaves no file at
+  all"). It is in the archive.
+- Builds without those journal lines lost the fight in both cases.
 
 What runs inside the per-line guard, on the pump thread (a throw here skips the LINE):
 
@@ -362,7 +416,13 @@ What no longer skips the line: the alert side. Trigger evaluation and every hand
 notifications each run in their own guard inside `LogLineProcessor.Process` (`AlertStage`).
 A throw there is handed to `LogLineProcessor.AlertFaulted`, the rest of the line still runs,
 and `LogSource` writes the `log-alert` report and the journal line. It is never counted as a
-skipped line or toward the 200. Earlier builds ran those handlers unguarded, several of them
+skipped line or toward the 200. Within the raid-line stage the roster tracker, the DKP
+progress counter and the loot tracker each have a guard of their own
+(`SourceManager.RunRaidLineConsumers`): one that throws no longer costs the other two that
+line, and what failed is still reported as one `raid line` alert fault (an
+`AggregateException` in the report means more than one of them threw). On the first build
+with alert containment they ran in sequence, so a throw in the roster tracker also lost that
+line's DKP confirmation and loot entry. Earlier builds ran those handlers unguarded, several of them
 BEFORE the grammar, so a handler bug cost the line's damage; a tester's "numbers went short
 when I turned that trigger on" on such a build is this.
 

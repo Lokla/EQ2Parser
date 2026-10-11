@@ -30,9 +30,25 @@ public sealed partial class MainViewModel : ObservableObject
     [ObservableProperty]
     private NavItem _selectedItem;
 
+    /// <summary>The warning strip under the tab bar: what is wrong with
+    /// the fight archive and what that means, in the interface language
+    /// (<see cref="ArchiveNotice"/>). Empty when nothing is, which is
+    /// nearly always — and then the strip is not there at all
+    /// (<see cref="ArchiveWarningVisible"/>). It sits in the shell, not on
+    /// a page, because the session it describes is losing fights whichever
+    /// page is open.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ArchiveWarningVisible))]
+    private string _archiveWarning = "";
+
+    public bool ArchiveWarningVisible => ArchiveWarning.Length > 0;
+
     public MainViewModel(SourceManager manager, OverlayController overlay)
     {
         Manager = manager;
+        // Before the window is shown: an archive set aside or out of reach
+        // at startup is on screen from the first frame, not a tick later.
+        ArchiveWarning = ArchiveNotice.For(manager.History);
         Main = new MainParseViewModel(manager);
         Sources = new SourcesViewModel(manager);
         Triggers = new TriggersViewModel(manager);
@@ -118,6 +134,10 @@ public sealed partial class MainViewModel : ObservableObject
         Manager.SpellTimers.Tick(DateTimeOffset.Now);
         Manager.Callouts.Tick(DateTimeOffset.Now);
         Manager.Uploads.TickAttendance(Manager, DateTimeOffset.Now);
+        // Polled here rather than raised by the archive: the saves that
+        // can fail happen on its writer thread, and the text only changes
+        // when a count does. Assigning an equal string raises nothing.
+        ArchiveWarning = ArchiveNotice.For(Manager.History);
         if (SelectedItem.Page == Main)
             Main.Refresh();
         else if (SelectedItem.Page == Sources)

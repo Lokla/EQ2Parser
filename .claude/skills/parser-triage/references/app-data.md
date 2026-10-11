@@ -107,7 +107,11 @@ that cache, not at a file.
 - "It re-read (or skipped) a chunk of my log after restarting": resume positions live in
   `settings.json` under `Sources`, written by `SourceManager.PersistSources` at exit and
   when a source is added or removed by hand. A session that did not exit cleanly keeps the
-  positions from the last of those.
+  positions from the last of those. A clean exit stops every log's reader BEFORE it saves
+  the positions, and then ends and archives any fight in progress, so the saved position is
+  the last line that fight holds: the next session starts on the line after it. If the game
+  was still mid-fight, the rest of that pull is a second, separate fight in the next
+  session.
 - "Old fights disappeared": startup deletes trash fights older than `HistoryTrashDays` and
   loads only the recent window into the tree (`HistoryService.RestoreInto`). Boss fights
   outside the window are still in the archive.
@@ -131,11 +135,29 @@ that cache, not at a file.
 that. Builds up to v0.5.7 threw instead, which since the fatal-startup change meant exit code
 71 on every launch until the file was removed by hand.
 
+The user is told on screen, in the interface language: a warning strip under the tab bar,
+on every page, for as long as the state is not `Healthy`, a save has failed this session,
+or a fight was not restored. The Archive window shows the same sentence in place of
+"Nothing found." when the session has no archive, and a one-line notice when a search, a
+load or a purge fails (crash report kind `archive-window`) instead of an error dialog. The
+words come from `src/EQ2Parser.App/ViewModels/ArchiveNotice.cs`, built from the state and
+the counters, never from the English text above; the exception's kind in brackets
+(`SqliteException 5`) is the one untranslated part and matches the journal. The first build
+with these archive states showed none of it.
+
+| Strip, in English | Means |
+| --- | --- |
+| `The fight archive was damaged and could not be read, so a new, empty one was started. Nothing was deleted: your earlier fights are kept in the file <name> in the data folder.` | `Quarantined` |
+| `The fight archive could not be opened (<kind>). Fights from this session are not being saved; the file was left as it is, and the next start will try again.` | `Unavailable`, file untouched |
+| `The fight archive was damaged, and a new one could not be created (<kind>). Fights from this session are not being saved; your earlier fights are kept in the file <name> in the data folder.` | `Unavailable` after a rename |
+| `<n> fights from this session could not be saved to the archive (<kind>). They were parsed and shown as usual, but they are not in the archive.` | `HistoryService.SaveFailures` is above zero; the kind is the last failure's |
+| `<n> recent fights could not be loaded from the archive (<kind>). They are missing from the fight list; the archive file was left as it is.` | `HistoryService.RestoreFailures`; without a count ("The recent fights could not be loaded ...") the list itself could not be read |
+
 | What the session found | State | What it did | Left behind |
 | --- | --- | --- | --- |
 | The file opens | `Healthy` | Nothing | Nothing |
 | SQLite calls the FILE bad: result code 26 "file is not a database" or 11 "database disk image is malformed" / "malformed database schema" (`HistoryStore.IsDamagedFile`) | `Quarantined` | Renamed `history.db` to `history.db.corrupt-<yyyyMMdd-HHmmss>` (a `-wal` / `-shm` beside it follows, as `...corrupt-<timestamp>-wal`), then started a fresh, empty archive. Nothing is deleted | `crash-*-archive-quarantined.txt`; journal `archive QUARANTINED — history.db was damaged (SqliteException <code>); renamed to <file>, a fresh archive started, nothing deleted` |
-| Anything else: locked or held by another process, access denied, disk full, path missing, an SQL error from this build's own migration, a missing native library | `Unavailable` | Left the file exactly as it is. The session has NO archive: fights parse, show and upload; none is saved; the archive window is empty | `crash-*-archive-unavailable.txt`; journal `archive UNAVAILABLE — history.db could not be opened; the file was left untouched (<exception type and SQLite code>); this session saves no fights` |
+| Anything else: locked or held by another process, access denied, disk full, path missing, an SQL error from this build's own migration, a missing native library | `Unavailable` | Left the file exactly as it is. The session has NO archive: fights parse, show and upload; none is saved; the Archive window lists nothing and says why | `crash-*-archive-unavailable.txt`; journal `archive UNAVAILABLE — history.db could not be opened; the file was left untouched (<exception type and SQLite code>); this session saves no fights` |
 | The file is damaged but will not rename (something else has it open), or it was renamed and a fresh one could not be created | `Unavailable` | As above; in the second case `HistoryService.QuarantinedPath` names the renamed file | `crash-*-archive-unavailable.txt`; journal `archive UNAVAILABLE — history.db is damaged and could not be moved aside ...` or `... was damaged ... and renamed to <file>, but a fresh archive could not be created ...` |
 
 Reading it:
@@ -151,6 +173,16 @@ Reading it:
   an antivirus scan. The next launch tries again by itself. Do NOT tell the tester to delete or
   rename `history.db`: it is very likely a healthy archive. The `SqliteException` number in the
   journal line says which: 5 busy, 14 cannot open, 8 read-only, 13 disk full, 10 IO error.
+- **Busy (5) costs two seconds, not thirty.** A statement waits at most
+  `HistoryStore.BusyTimeoutSeconds` for a database another process holds locked, then fails.
+  At startup that is a two-second pause before the window, then a session without an
+  archive. On builds before that bound the provider's default applied: "the app took half a
+  minute to open, then my history was empty" is a locked `history.db` on such a build. The
+  bound only ever applies against another process. Inside the app one connection is shared
+  behind `HistoryService`'s lock, so its writer and the UI thread never meet in SQLite. The
+  cost of the short bound: a lock held for between two and thirty seconds, which used to be
+  waited out, now fails that one statement (a save counted in `SaveFailures`, a search
+  answered with a notice).
 - **The split is deliberately lopsided.** Renaming a healthy archive looks, to its owner,
   exactly like losing it, so only SQLite's own verdict on the file moves it. A file SQLite can
   open but this build's SQL trips over (result code 1) is left alone, and the session has no
@@ -166,8 +198,8 @@ Reading it:
   title and zone) and a journal line
   `archive save FAILED: <type and SQLite code> (<n> this session)` for the 1st, 10th, 100th
   failure and so on, then the total at exit, `archive: <n> fight saves failed this session`.
-  `HistoryService.SaveFailures` counts every one. A full disk fails one save per fight, which
-  is why the journal thins out.
+  `HistoryService.SaveFailures` counts every one, and the warning strip shows that count as
+  it rises. A full disk fails one save per fight, which is why the journal thins out.
 - **A failed exit backup** leaves `history.db` and both existing backups untouched. Evidence:
   `crash-*-archive-backup.txt` and the journal line `archive: exit backup FAILED (...)`.
 

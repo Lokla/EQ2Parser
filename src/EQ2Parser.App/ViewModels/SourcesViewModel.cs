@@ -114,12 +114,31 @@ public sealed partial class SourcesViewModel(SourceManager manager) : Observable
     /// Each part is a whole dictionary string and the parts are joined
     /// with <see cref="StatusSeparator"/>, so no language has to fit its
     /// words around another's order. Two things in the line stay as they
-    /// come: the error message (an exception's own text) and the exception
-    /// type name, which is what the user quotes from the crashes folder.</summary>
+    /// come: an exception's own message and its type name, which is what
+    /// the user quotes from the crashes folder.
+    ///
+    /// A stopped source's sentence is built HERE, from the facts in
+    /// <see cref="LogSource.Stopped"/>, not taken from the exception the
+    /// source made for its crash report: that message is English by design
+    /// ("stopped after N lines in a row failed to process"), and shown
+    /// after a translated "error:" it left half the row in the wrong
+    /// language. The English row is word for word what it was.
+    ///
+    /// Alert-handler faults ride on the end like skipped lines do, and
+    /// only when there are any: the line that faulted was parsed, so they
+    /// say nothing about the counters before them.</summary>
     internal static string StatusFor(LogSource source)
     {
-        if (source.Error is { } error)
-            return Loc.Format("Sources_StatusError", error.Message);
+        if (source.Stopped is { } stopped)
+        {
+            return stopped.Reason switch
+            {
+                SourceStopReason.TooManyFailedLines => Loc.Format(
+                    "Sources_StatusStoppedLines", stopped.FailedLines, stopped.Cause.GetType().Name, stopped.Cause.Message),
+                SourceStopReason.ReaderFailed => Loc.Format("Sources_StatusStoppedReader", stopped.Cause.Message),
+                _ => Loc.Format("Sources_StatusError", stopped.Error.Message),
+            };
+        }
         var status = Loc.Format(
             "Sources_StatusCounts",
             source.Processor.LinesSeen, source.Processor.LinesMatched, source.Engine.History.Count);
@@ -128,6 +147,9 @@ public sealed partial class SourcesViewModel(SourceManager manager) : Observable
         var skipped = source.SkippedLines;
         if (skipped > 0)
             status += StatusSeparator + Loc.Format("Sources_StatusSkipped", skipped, source.LastLineError?.GetType().Name);
+        var alertFaults = source.AlertFaults;
+        if (alertFaults > 0)
+            status += StatusSeparator + Loc.Format("Sources_StatusAlertFaults", alertFaults, source.LastAlertError?.GetType().Name);
         return status;
     }
 

@@ -21,8 +21,17 @@ Decide every string against this before choosing a key.
 - **A string that is both shown and spoken or logged is split.** Localize the shown copy only.
   `SourceManager.CalloutToast` is the pattern: the callout is spoken in English and toasted in the interface
   language.
+- **A sentence the app wrote for a log is never the sentence it shows.** When a service builds English text
+  for a crash report or the journal (an exception it constructs, a status property), give the view the facts
+  behind it and build the shown sentence from those through keys. Two examples to copy: a stopped source's
+  exception says "stopped after 200 lines in a row failed to process" for its crash report, while
+  `SourcesViewModel.StatusFor` words the row from `LogSource.Stopped` (the reason, the count, the exception
+  underneath); and `HistoryService.Problem` is English for whoever reads a report, while the warning strip
+  and the Archive window take their text from `src/EQ2Parser.App/ViewModels/ArchiveNotice.cs`, which reads
+  the state and the counters.
 - **A translated line may carry untranslated data** as an argument: the Sources row keeps the exception type
-  name, the curation labels keep the damage school.
+  name and the exception's own message, the archive notices keep the exception's kind and a file name, the
+  curation labels keep the damage school.
 
 ## Checklist: a string
 
@@ -30,8 +39,9 @@ Decide every string against this before choosing a key.
    XAML (`Settings_`, `Main_`, `Overlays_`, `Triggers_`, `Timers_`, `Raid_`, `Nav_`, `Cols_`), the page name
    plus `Vm` for view-model code (`SettingsVm_`, `TriggersVm_`), `...Svc_` for services (`UploadSvc_`), and
    the view or class name where one class serves several pages (`OverlayShell_`, `CategoryTree_`, `CrashDlg_`,
-   `Callout_`). A page whose keys already share one prefix across XAML and code (`Sources_`, `Curation_`,
-   `Archive_`) keeps it.
+   `Callout_`, and `ArchiveNotice_` for the archive warnings the main window and the Archive window share).
+   A page whose keys already share one prefix across XAML and code (`Sources_`, `Curation_`, `Archive_`)
+   keeps it.
 2. Add the key to all four files, at the same position beside its prefix group:
    `src/EQ2Parser.App/Localization/strings.en.json`, `src/EQ2Parser.App/Localization/strings.de.json`,
    `src/EQ2Parser.App/Localization/strings.fr.json`, `src/EQ2Parser.App/Localization/strings.ru.json`. The
