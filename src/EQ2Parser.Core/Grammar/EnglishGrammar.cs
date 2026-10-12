@@ -256,6 +256,25 @@ public static partial class EnglishGrammar
     [GeneratedRegex(@"^(?<victim>.+?)(?:'s)? has been banished!$")]
     private static partial Regex Banished();
 
+    // Doomcoil in The Protector's Realm (29.08, -10.09, 298.89)
+    // Some clients write a death with where it happened after the victim's
+    // name: " in <zone> (<x>, <y>, <z>)". Every death shape above captures
+    // that tail as part of the name, which filed the death under a
+    // combatant nobody fought. A boss that died this way still showed 0
+    // deaths, so the kill read as a partial. The name ends at the first
+    // " in ": in every stored case the text after it was the fight's zone.
+    [GeneratedRegex(@"^(?<name>.+?) in .+? \(-?\d+(?:\.\d+)?, -?\d+(?:\.\d+)?, -?\d+(?:\.\d+)?\)$")]
+    private static partial Regex DeathLocation();
+
+    private static DeathEvent Death(string killer, string victim)
+    {
+        Match m;
+        if (victim.EndsWith(')')
+            && (m = DeathLocation().Match(victim)).Success)
+            victim = m.Groups["name"].Value;
+        return new DeathEvent(killer, victim);
+    }
+
     // ── Zone ────────────────────────────────────────────────────────────────
 
     [GeneratedRegex(@"^You have entered (?<zone>.+?)\.$")]
@@ -408,16 +427,16 @@ public static partial class EnglishGrammar
             return Status(m.Groups["victim"].Value, m.Groups["effect"].Value, applied: false);
         if (message.StartsWith("You have killed ", StringComparison.Ordinal)
             && (m = YouKilled().Match(message)).Success)
-            return new DeathEvent(You, m.Groups["victim"].Value);
+            return Death(You, m.Groups["victim"].Value);
         if (message.StartsWith("Alas, ", StringComparison.Ordinal)
             && (m = AlasDied().Match(message)).Success)
-            return new DeathEvent("Unknown", m.Groups["victim"].Value);
+            return Death("Unknown", m.Groups["victim"].Value);
         if (message.Contains(" has been slain by ", StringComparison.Ordinal)
             && (m = SlainBy().Match(message)).Success)
-            return new DeathEvent(m.Groups["killer"].Value, m.Groups["victim"].Value);
+            return Death(m.Groups["killer"].Value, m.Groups["victim"].Value);
         if (message.Contains(" has killed ", StringComparison.Ordinal)
             && (m = HasKilled().Match(message)).Success)
-            return new DeathEvent(m.Groups["killer"].Value, m.Groups["victim"].Value);
+            return Death(m.Groups["killer"].Value, m.Groups["victim"].Value);
         if (message.EndsWith(" dies.", StringComparison.Ordinal))
         {
             // "Rusk's fae fire sputters and dies." — a dumbfire expiring
@@ -425,11 +444,11 @@ public static partial class EnglishGrammar
             if (message.EndsWith(" sputters and dies.", StringComparison.Ordinal))
                 return null;
             if ((m = Dies().Match(message)).Success)
-                return new DeathEvent("Unknown", m.Groups["victim"].Value);
+                return Death("Unknown", m.Groups["victim"].Value);
         }
         if (message.EndsWith(" has been banished!", StringComparison.Ordinal)
             && (m = Banished().Match(message)).Success)
-            return new DeathEvent("Unknown", m.Groups["victim"].Value);
+            return Death("Unknown", m.Groups["victim"].Value);
         if (message.StartsWith("You have entered ", StringComparison.Ordinal)
             && (m = ZoneEntered().Match(message)).Success)
             return new ZoneEvent(m.Groups["zone"].Value);
