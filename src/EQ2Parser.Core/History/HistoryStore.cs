@@ -636,8 +636,10 @@ public sealed class HistoryStore : IDisposable
         using var reader = cmd.ExecuteReader();
         while (reader.Read())
         {
+            // Column 4 is the ability; the stored category is read through
+            // the current rule (see Swing.CurrentCategory).
             results.Add(new Swing(
-                (SwingCategory)reader.GetInt32(0),
+                Swing.CurrentCategory((SwingCategory)reader.GetInt32(0), reader.GetString(4)),
                 reader.GetInt32(1) == 1,
                 reader.GetString(2),
                 reader.GetString(3),

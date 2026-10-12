@@ -492,15 +492,25 @@ public static partial class EnglishGrammar
         if (!TryParseAmount(m.Groups["amount"].Value, out var amount))
             return null;
         var school = m.Groups["school"].Value;
-        // Auto-attack vs skill follows the ABILITY alone, never the school:
-        // named abilities are skills even when they deal
-        // crushing/piercing/slashing (an Assassin's whole kit), and plain
-        // attacks plus the multi/double/flurry/AoE autoattack verbs are
-        // melee even when infused to another school entirely (Asame's
-        // autoattack deals disease). Matches ACT's Auto-Attack (Out) /
-        // Skill/Ability (Out) split.
+        // Auto-attack vs skill follows the ABILITY alone — never the school,
+        // and never the verb:
+        //  * a named ability is a skill even when it deals
+        //    crushing/piercing/slashing (an Assassin's whole kit);
+        //  * a combatant's own swing is melee even when infused to another
+        //    school entirely (Asame's autoattack deals disease), and
+        //    whichever verb it used (hit / multi attack / flurry / AoE);
+        //  * a NAMED thing's multi attack / flurry / AoE is still that named
+        //    thing's — "Menludiir's unswerving hammer multi attacks", a
+        //    Swashbuckler's thug, a spell that multi attacks. The verb is
+        //    the swing's Special. It used to force such swings to melee,
+        //    which split one pet across both buckets by verb (its plain hits
+        //    a skill, its multi attacks an auto-attack) and made Auto-Attack
+        //    (Out) read higher than the "Auto-Attack" row in Outgoing
+        //    Damage, and higher than ACT, by exactly the pets' share.
+        // This is ACT's rule: a possessive name before the verb makes the
+        // swing a skill of the owner; the verb never decides the bucket.
         var special = SpecialFromVerb(m.Groups["verb"].Value);
-        var category = ability == AutoAttackAbility || special != "None"
+        var category = ability == AutoAttackAbility
             ? SwingCategory.Melee
             : SwingCategory.NonMelee;
         return new SwingEvent(

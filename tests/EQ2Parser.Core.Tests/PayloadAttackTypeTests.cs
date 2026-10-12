@@ -505,13 +505,13 @@ public class PayloadAttackTypeTests
     }
 
     [Fact]
-    public void A_Name_Logged_As_Both_Auto_Attack_And_Skill_Is_A_Row_For_Each()
+    public void A_Pets_Hits_And_Multi_Attacks_Are_One_Skill_Row()
     {
-        // The grammar files a multi attack / flurry as melee (1) even under
-        // an ability name, and that name's plain hits as skill damage (2).
-        // Both rows land on the site's Damage tab (it selects 1 and 2), as
-        // the Auto-Attack (Out) / Skill (Out) split has them; between them
-        // they carry the combatant's damage exactly once.
+        // A named thing's multi attack / flurry is that thing's swing, a
+        // skill like its plain hits (the verb is the swing's Special). It
+        // used to be filed as melee, which uploaded the same pet as two
+        // rows, one under each swing type, and put half of it in the
+        // owner's Auto-Attack (Out) figure.
         var payload = PayloadBuilder.Build(
             Fight(
                 (0, "YOU hit Lord Vexmoor for 400 slashing damage."),
@@ -521,11 +521,22 @@ public class PayloadAttackTypeTests
                 (3, "You have killed Lord Vexmoor.")),
             "Varsoon");
 
-        var skill = Row(payload, "Brenna", "spectral hammer", SwingCategory.NonMelee);
-        var melee = Row(payload, "Brenna", "spectral hammer", SwingCategory.Melee);
-        Assert.Equal((100L, 1, 0), (skill.Damage, skill.Hits, skill.CritHits));
-        Assert.Equal((250L, 1, 1), (melee.Damage, melee.Hits, melee.CritHits));
+        var hammer = Row(payload, "Brenna", "spectral hammer", SwingCategory.NonMelee);
+        Assert.Equal((350L, 2, 1), (hammer.Damage, hammer.Hits, hammer.CritHits));
+        Assert.DoesNotContain(payload.AttackTypes, r =>
+            r.Attacker == "Brenna" && r.SwingType == (int)SwingCategory.Melee);
         Assert.Equal(350, payload.Combatants.Single(c => c.Name == "Brenna").Damage);
+
+        // The buckets agree with the rows: nothing of the hammer's is in
+        // the auto-attack figure, and the owner's own swing still is.
+        Assert.DoesNotContain(payload.DamageTypes, d =>
+            d.Combatant == "Brenna" && d.Type == BucketConfig.AutoAttackOut);
+        var skillBucket = Assert.Single(payload.DamageTypes, d =>
+            d.Combatant == "Brenna" && d.Type == BucketConfig.SkillOut);
+        Assert.Equal(350, skillBucket.Damage);
+        var ownAuto = Assert.Single(payload.DamageTypes, d =>
+            d.Combatant == "Aldwyn" && d.Type == BucketConfig.AutoAttackOut);
+        Assert.Equal(400, ownAuto.Damage);
     }
 
     [Fact]

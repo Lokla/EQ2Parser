@@ -56,8 +56,11 @@ public sealed class HistoryStoreTests : IDisposable
         var swings = store.LoadSwings(id);
         Assert.Equal(4, swings.Count);
 
+        // The fixture stores a NAMED ability's multi attack as melee, the
+        // way builds up to v0.5.7 filed it. It is read back as a skill
+        // (Swing.CurrentCategory); everything else about it is unchanged.
         var crit = swings[0];
-        Assert.Equal((SwingCategory.Melee, true, "Multi Attack", 1500L), (crit.Category, crit.Critical, crit.Special, crit.Damage.Number));
+        Assert.Equal((SwingCategory.NonMelee, true, "Multi Attack", 1500L), (crit.Category, crit.Critical, crit.Special, crit.Damage.Number));
 
         var ward = swings[1];
         Assert.Equal("remaining=4041", ward.Extra);
@@ -69,6 +72,47 @@ public sealed class HistoryStoreTests : IDisposable
         var death = swings[3];
         Assert.True(death.Damage.IsDeath);
         Assert.Equal(Combatant.KillingAbility, death.Ability);
+    }
+
+    // Builds up to v0.5.7 filed "Owner's thug multi attacks" as melee
+    // because of the verb. An archive they wrote is read through today's
+    // rule, so an old fight splits Auto-Attack / Skill the way a fight
+    // parsed now does, without the file being rewritten.
+    [Theory]
+    [InlineData(SwingCategory.Melee, "thug", SwingCategory.NonMelee)]
+    [InlineData(SwingCategory.Melee, "unswerving hammer", SwingCategory.NonMelee)]
+    [InlineData(SwingCategory.Melee, Swing.AutoAttackAbility, SwingCategory.Melee)]
+    [InlineData(SwingCategory.Melee, Combatant.KillingAbility, SwingCategory.Melee)]
+    [InlineData(SwingCategory.NonMelee, "thug", SwingCategory.NonMelee)]
+    [InlineData(SwingCategory.Healing, "Greater Heal", SwingCategory.Healing)]
+    [InlineData(SwingCategory.Threat, "Taunt", SwingCategory.Threat)]
+    public void A_Stored_Category_Is_Read_Through_The_Current_Rule(SwingCategory stored, string ability, SwingCategory expected) =>
+        Assert.Equal(expected, Swing.CurrentCategory(stored, ability));
+
+    [Fact]
+    public void An_Old_Fights_Pet_Multi_Attacks_Leave_The_Auto_Attack_Bucket_When_Restored()
+    {
+        var engine = new ParserEngine("log-a", "Tester");
+        engine.ChangeZone("Deathtoll");
+        Assert.True(engine.SetEncounter(T0, "Tester", "Lord Bob"));
+        engine.AddSwing(SwingCategory.Melee, false, "None", "Tester", Swing.AutoAttackAbility, 400, T0, "Lord Bob", "slashing");
+        engine.AddSwing(SwingCategory.NonMelee, false, "None", "Tester", "thug", 100, T0.AddSeconds(1), "Lord Bob", "slashing");
+        // As an older build stored it: melee, because the verb was "multi attacks".
+        engine.AddSwing(SwingCategory.Melee, true, "Multi Attack", "Tester", "thug", 250, T0.AddSeconds(2), "Lord Bob", "slashing");
+        engine.EndCombat();
+        var original = engine.History[^1];
+        Assert.Equal(650, original.Combatants["TESTER"].OutgoingBuckets[BucketConfig.AutoAttackOut].All.Damage);
+
+        using var store = Store();
+        store.SaveEncounter(original);
+        var restored = store.RestoreEncounter(store.SearchEncounters().Single());
+
+        var tester = restored.Combatants["TESTER"];
+        Assert.Equal(400, tester.OutgoingBuckets[BucketConfig.AutoAttackOut].All.Damage);
+        Assert.Equal(350, tester.OutgoingBuckets[BucketConfig.SkillOut].All.Damage);
+        // What the combatant did in total has not moved.
+        Assert.Equal(750, tester.OutgoingBuckets[BucketConfig.OutgoingDamage].All.Damage);
+        Assert.Equal(original.Combatants["TESTER"].Damage, tester.Damage);
     }
 
     [Fact]

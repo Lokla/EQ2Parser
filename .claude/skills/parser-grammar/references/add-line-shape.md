@@ -124,10 +124,12 @@ one `"`.
   to the `DamageVerbs` constant, the third-person form before the second-person one
   (`flurries|flurry`), and add both to the `SpecialFromVerb` switch. `DamageVerbs` feeds four
   patterns at once (`YourAbilityDamage`, `YouAutoDamage`, `PossessiveAbilityDamage`,
-  `PlainDamage`). `SpecialFromVerb` falls back to `"None"`, and `Damage` uses that to choose
-  `SwingCategory.Melee` or `NonMelee`, so a verb missing from the switch parses but is
-  counted as a skill with no special. The three no-damage patterns hard-code `hits` and do
-  not use `DamageVerbs`.
+  `PlainDamage`). `SpecialFromVerb` falls back to `"None"`, so a verb missing from the switch
+  parses but loses its special. The verb only ever sets the swing's `Special`: the
+  category follows the ability alone (`Auto-Attack` is melee, any named thing is a skill),
+  so `Owner's thug multi attacks` is a skill like the thug's plain hits. That is ACT's rule,
+  and it is what keeps Auto-Attack (Out) equal to the combatant's own swings. The three
+  no-damage patterns hard-code `hits` and do not use `DamageVerbs`.
 - **A new avoid outcome.** Add it to the `outcome` alternation of both `AvoidLine` and
   `YouAvoid`, in both conjugations (`parries` and `parry`), and to the `AvoidFrom` switch.
   The switch's default arm is `Dodge`: an outcome present in the regexes and absent from the

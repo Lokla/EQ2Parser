@@ -104,8 +104,46 @@ public class EnglishGrammarTests
         Assert.Equal("Menludiir", s.Attacker);
         Assert.Equal("unswerving hammer", s.Ability);
         Assert.Equal("Multi Attack", s.Special);
-        Assert.Equal(SwingCategory.Melee, s.Category);
+        // The verb is the swing's Special, not its category: this is the
+        // hammer's attack, a named thing, so it is a skill of its owner.
+        Assert.Equal(SwingCategory.NonMelee, s.Category);
         Assert.True(s.Critical);
+    }
+
+    // A pet, a dumbfire or a spell logged as "Owner's <name>" makes plain
+    // hits AND multi attacks / flurries. Both are that named thing's, so
+    // both are skills: the melee verb must not move half of a pet's damage
+    // into its owner's auto-attack bucket (it did, and Auto-Attack (Out)
+    // then read higher than the Auto-Attack row beside it, and than ACT).
+    [Theory]
+    [InlineData("Tester's thug hits a gnoll for 300 slashing damage.", "None")]
+    [InlineData("Tester's thug multi attacks a gnoll for a critical of 450 slashing damage.", "Multi Attack")]
+    [InlineData("Tester's thug flurries a gnoll for 200 piercing damage.", "Flurry")]
+    [InlineData("Tester's Whirling Blades aoe attacks a gnoll for 120 slashing damage.", "AoE Attack")]
+    [InlineData("Tester's Fiery Annihilation multi attacks a gnoll for 9,000 heat damage.", "Multi Attack")]
+    [InlineData("YOUR thug multi attacks a gnoll for 450 slashing damage.", "Multi Attack")]
+    [InlineData("YOUR thug double attacks a gnoll for 450 slashing damage.", "Multi Attack")]
+    public void A_Named_Things_Swings_Are_Skills_Whatever_The_Verb(string line, string special)
+    {
+        var s = Swing(line);
+        Assert.Equal(SwingCategory.NonMelee, s.Category);
+        Assert.Equal(special, s.Special);
+        Assert.NotEqual(EnglishGrammar.AutoAttackAbility, s.Ability);
+    }
+
+    // The combatant's OWN swings are auto-attacks whatever the verb.
+    [Theory]
+    [InlineData("YOU multi attack a gnoll for 120 crushing damage.", "Multi Attack")]
+    [InlineData("YOU flurry a gnoll for 90 crushing damage.", "Flurry")]
+    [InlineData("YOU aoe attack a gnoll for 80 crushing damage.", "AoE Attack")]
+    [InlineData("Tester multi attacks a gnoll for 120 crushing damage.", "Multi Attack")]
+    [InlineData("Tester flurries a gnoll for 90 crushing damage.", "Flurry")]
+    public void A_Combatants_Own_Swings_Are_Auto_Attacks_Whatever_The_Verb(string line, string special)
+    {
+        var s = Swing(line);
+        Assert.Equal(SwingCategory.Melee, s.Category);
+        Assert.Equal(special, s.Special);
+        Assert.Equal(EnglishGrammar.AutoAttackAbility, s.Ability);
     }
 
     // Second-person autoattack verbs are conjugated WITHOUT the s ("YOU multi
@@ -219,7 +257,7 @@ public class EnglishGrammarTests
     // Infused autoattacks keep their melee category whatever the school.
     [InlineData("Asame hits Sarik the Fang for 4,540 disease damage.", SwingCategory.Melee)]
     [InlineData("Asame multi attacks Sarik the Fang for a critical of 3,831 disease damage.", SwingCategory.Melee)]
-    [InlineData("Menludiir's unswerving hammer multi attacks a krait patriarch for a critical of 2,378 crushing damage.", SwingCategory.Melee)]
+    [InlineData("Menludiir's unswerving hammer multi attacks a krait patriarch for a critical of 2,378 crushing damage.", SwingCategory.NonMelee)]
     [InlineData("YOUR Divine Strike hits a bog slug for a critical of 15,032 divine damage.", SwingCategory.NonMelee)]
     public void AutoAttack_Versus_Skill_Follows_The_Ability(string line, SwingCategory expected) =>
         Assert.Equal(expected, Swing(line).Category);

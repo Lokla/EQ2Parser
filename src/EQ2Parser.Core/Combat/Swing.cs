@@ -60,6 +60,21 @@ public sealed record Swing(
     /// Combat (the bottom layer); the grammar aliases it.</summary>
     public const string AutoAttackAbility = "Auto-Attack";
 
+    /// <summary>The category a damage swing has under the current rule,
+    /// given the one it was STORED with. Builds up to v0.5.7 filed a named
+    /// thing's multi attack / flurry / AoE as melee because of the verb
+    /// ("Owner's thug multi attacks"); it is a skill, like the thing's plain
+    /// hits. A melee swing is an auto-attack only under the Auto-Attack
+    /// pseudo-ability (or the Killing marker), so anything else stored as
+    /// melee is one of those and is read back as a skill. Applied when the
+    /// archive is loaded, so fights saved by an older build split their
+    /// buckets the same way as fights parsed today; the file is not
+    /// rewritten.</summary>
+    public static SwingCategory CurrentCategory(SwingCategory stored, string ability) =>
+        stored == SwingCategory.Melee && ability != AutoAttackAbility && ability != Combatant.KillingAbility
+            ? SwingCategory.NonMelee
+            : stored;
+
     /// <summary>The name heuristic ACT uses everywhere: a name containing a
     /// space is an NPC/pet, not a player.</summary>
     public static bool LooksLikePlayer(string name) =>

@@ -154,6 +154,20 @@ damage lands in TWO buckets** (its split bucket + aggregate "Outgoing
 Damage"); incoming lands in one. Unknown swing types are silently ignored
 except for the Ref buckets.
 
+**Auto-attack versus skill** follows the ability alone, never the damage
+school and never the verb. A combatant's own swing (`YOU hit`, `Name multi
+attacks`, `Name flurries`) is melee under the fixed ability "Auto-Attack"; a
+swing under a name (`Name's Ability hits`, `YOUR Ability multi attacks`) is a
+skill of that owner, whatever the verb. So a pet or dumbfire logged as
+`Owner's thug` is entirely a skill row of its owner: its multi attacks and
+flurries are not in the owner's Auto-Attack (Out). The verb is the swing's
+Special (None / Multi Attack / Flurry / AoE Attack). This is ACT's rule.
+Builds up to v0.5.7 let the verb force melee for named things, which put
+pets' multi attacks in Auto-Attack (Out); archived fights from those builds
+are read through the current rule (`Swing.CurrentCategory`). Only the
+Auto-Attack / Skill split moved: Outgoing Damage, EncDPS and every total
+are the same.
+
 **Dnum** (damage value type): >0 real, 0 no-damage, −1 miss, −2 resist,
 −3 parry, −4 riposte, −5 block, −6…−9 custom/unknown, −10 death. Traps:
 long→Dnum conversion clamps <−10 to −9; equality compares the custom STRING
