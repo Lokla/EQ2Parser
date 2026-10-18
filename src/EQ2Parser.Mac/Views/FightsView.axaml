@@ -1,0 +1,78 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:EQ2Parser.Mac.ViewModels"
+             x:Class="EQ2Parser.Mac.Views.FightsView"
+             x:DataType="vm:FightsViewModel">
+  <Grid ColumnDefinitions="270,6,*" Margin="0,8,0,8">
+
+    <!-- Fight list -->
+    <DockPanel>
+      <Grid DockPanel.Dock="Top" ColumnDefinitions="*,Auto" Margin="0,0,0,6">
+        <TextBlock Text="Fights" Classes="header" VerticalAlignment="Center" />
+        <ToggleButton Grid.Column="1" Content="Follow live" IsChecked="{Binding FollowLive}"
+                      Command="{Binding FollowCommand}" Padding="10,3" FontSize="12" />
+      </Grid>
+      <ListBox ItemsSource="{Binding Fights}" SelectedItem="{Binding SelectedFight}" Background="#1A1D27">
+        <ListBox.ItemTemplate>
+          <DataTemplate x:DataType="vm:FightItem">
+            <StackPanel Spacing="1">
+              <TextBlock Text="{Binding Title}" Foreground="{Binding TitleBrush}" FontWeight="SemiBold"
+                         TextTrimming="CharacterEllipsis" />
+              <TextBlock Text="{Binding Detail}" Classes="muted" FontSize="11" TextTrimming="CharacterEllipsis" />
+            </StackPanel>
+          </DataTemplate>
+        </ListBox.ItemTemplate>
+      </ListBox>
+    </DockPanel>
+
+    <GridSplitter Grid.Column="1" Background="Transparent" ResizeDirection="Columns" />
+
+    <!-- The fight shown -->
+    <Grid Grid.Column="2" RowDefinitions="Auto,2*,Auto,*">
+      <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,0,0,6">
+        <Border Background="#4ADE80" CornerRadius="3" Padding="6,1" IsVisible="{Binding IsLive}" VerticalAlignment="Center">
+          <TextBlock Text="LIVE" Foreground="#15171F" FontSize="11" FontWeight="Bold" />
+        </Border>
+        <TextBlock Text="{Binding Breadcrumb}" FontSize="15" FontWeight="SemiBold" VerticalAlignment="Center"
+                   TextTrimming="CharacterEllipsis" />
+      </StackPanel>
+
+      <DataGrid Grid.Row="1" ItemsSource="{Binding Allies}" Background="#1A1D27">
+        <DataGrid.Columns>
+          <DataGridTemplateColumn Header="Name" Width="2*">
+            <DataGridTemplateColumn.CellTemplate>
+              <DataTemplate x:DataType="vm:CombatantRowVm">
+                <Grid Margin="6,0">
+                  <ProgressBar Value="{Binding Bar}" Maximum="1" MinHeight="22" Opacity="0.22"
+                               Foreground="{Binding ClassBrush}" Background="Transparent" CornerRadius="2" />
+                  <TextBlock Text="{Binding Name}" Foreground="{Binding ClassBrush}" FontWeight="SemiBold"
+                             VerticalAlignment="Center" Margin="6,0" />
+                </Grid>
+              </DataTemplate>
+            </DataGridTemplateColumn.CellTemplate>
+          </DataGridTemplateColumn>
+          <DataGridTextColumn Header="Class" Binding="{Binding ClassName}" Width="110" />
+          <DataGridTextColumn Header="Time" Binding="{Binding Duration}" Width="76" />
+          <DataGridTextColumn Header="Damage" Binding="{Binding Damage}" Width="94" />
+          <DataGridTextColumn Header="%" Binding="{Binding Percent}" Width="56" />
+          <DataGridTextColumn Header="EncDPS" Binding="{Binding Dps}" Width="92" />
+          <DataGridTextColumn Header="EncHPS" Binding="{Binding Hps}" Width="94" />
+          <DataGridTextColumn Header="Taken" Binding="{Binding Taken}" Width="86" />
+          <DataGridTextColumn Header="Deaths" Binding="{Binding Deaths}" Width="80" />
+        </DataGrid.Columns>
+      </DataGrid>
+
+      <TextBlock Grid.Row="2" Text="Enemies" Classes="header" Margin="0,10,0,4" />
+      <DataGrid Grid.Row="3" ItemsSource="{Binding Enemies}" Background="#1A1D27">
+        <DataGrid.Columns>
+          <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="2*" />
+          <DataGridTextColumn Header="Time" Binding="{Binding Duration}" Width="76" />
+          <DataGridTextColumn Header="Damage" Binding="{Binding Damage}" Width="94" />
+          <DataGridTextColumn Header="EncDPS" Binding="{Binding Dps}" Width="92" />
+          <DataGridTextColumn Header="Taken" Binding="{Binding Taken}" Width="86" />
+          <DataGridTextColumn Header="Deaths" Binding="{Binding Deaths}" Width="80" />
+        </DataGrid.Columns>
+      </DataGrid>
+    </Grid>
+  </Grid>
+</UserControl>

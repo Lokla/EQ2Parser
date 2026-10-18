@@ -1,0 +1,29 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:EQ2Parser.Mac.ViewModels"
+        xmlns:views="using:EQ2Parser.Mac.Views"
+        x:Class="EQ2Parser.Mac.MainWindow"
+        x:DataType="vm:MainViewModel"
+        Title="EQ2Parser"
+        Width="1180" Height="720" MinWidth="760" MinHeight="460"
+        Background="#15171F">
+  <DockPanel>
+    <Border DockPanel.Dock="Bottom" Background="#1C1F2A" Padding="12,5">
+      <Grid ColumnDefinitions="*,Auto">
+        <TextBlock Text="{Binding StatusLine}" Classes="muted" FontSize="12" TextTrimming="CharacterEllipsis" />
+        <TextBlock Grid.Column="1" Text="{Binding Notification}" FontSize="12" Foreground="#FBBF24" Margin="16,0,0,0" />
+      </Grid>
+    </Border>
+    <TabControl Padding="0" Margin="8,4,8,0">
+      <TabItem Header="Fights">
+        <views:FightsView DataContext="{Binding Fights}" />
+      </TabItem>
+      <TabItem Header="Triggers">
+        <views:TriggersView DataContext="{Binding Triggers}" />
+      </TabItem>
+      <TabItem Header="Settings">
+        <views:SettingsView DataContext="{Binding Settings}" />
+      </TabItem>
+    </TabControl>
+  </DockPanel>
+</Window>

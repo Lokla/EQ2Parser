@@ -1,0 +1,76 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:EQ2Parser.Mac.ViewModels"
+             x:Class="EQ2Parser.Mac.Views.TriggersView"
+             x:DataType="vm:TriggersViewModel">
+  <Grid ColumnDefinitions="*,6,380" Margin="0,8,0,8">
+
+    <!-- All triggers -->
+    <Grid RowDefinitions="Auto,*,Auto,150">
+      <Grid ColumnDefinitions="Auto,*" Margin="0,0,0,6">
+        <TextBlock Text="Triggers" Classes="header" VerticalAlignment="Center" Margin="0,0,12,0" />
+        <TextBox Grid.Column="1" Text="{Binding Filter}" Watermark="Filter by pattern, zone or text" />
+      </Grid>
+      <DataGrid Grid.Row="1" ItemsSource="{Binding Triggers}" SelectedItem="{Binding Selected}"
+                Background="#1A1D27">
+        <DataGrid.Columns>
+          <DataGridTemplateColumn Header="On" Width="64">
+            <DataGridTemplateColumn.CellTemplate>
+              <DataTemplate x:DataType="vm:TriggerRow">
+                <CheckBox IsChecked="{Binding Enabled}" HorizontalAlignment="Center" />
+              </DataTemplate>
+            </DataGridTemplateColumn.CellTemplate>
+          </DataGridTemplateColumn>
+          <DataGridTextColumn Header="Zone / category" Binding="{Binding Scope}" Width="*" />
+          <DataGridTextColumn Header="Pattern" Binding="{Binding Pattern}" Width="2*" />
+          <DataGridTextColumn Header="Alert" Binding="{Binding Sound}" Width="1.5*" />
+          <DataGridTextColumn Header="From" Binding="{Binding Origin}" Width="70" />
+        </DataGrid.Columns>
+      </DataGrid>
+      <TextBlock Grid.Row="2" Text="Recent alerts" Classes="header" Margin="0,10,0,4" />
+      <ListBox Grid.Row="3" ItemsSource="{Binding RecentAlerts}" Background="#1A1D27" FontSize="12" />
+    </Grid>
+
+    <!-- Editor -->
+    <ScrollViewer Grid.Column="2">
+      <StackPanel Spacing="8" Margin="8,0,0,0">
+        <TextBlock Text="Trigger" Classes="header" />
+        <TextBlock Text="When a log line matches (regular expression)" Classes="muted" FontSize="12" />
+        <TextBox Text="{Binding Regex}" IsEnabled="{Binding CanEdit}" FontFamily="Menlo" TextWrapping="Wrap" />
+        <Grid ColumnDefinitions="*,8,*">
+          <StackPanel Spacing="4">
+            <TextBlock Text="Category" Classes="muted" FontSize="12" />
+            <TextBox Text="{Binding Category}" IsEnabled="{Binding CanEdit}" Watermark="General" />
+          </StackPanel>
+          <StackPanel Grid.Column="2" Spacing="4">
+            <TextBlock Text="Zone (optional)" Classes="muted" FontSize="12" />
+            <TextBox Text="{Binding Zone}" IsEnabled="{Binding CanEdit}" />
+          </StackPanel>
+        </Grid>
+        <TextBlock Text="Then" Classes="muted" FontSize="12" />
+        <ComboBox ItemsSource="{Binding SoundOptions}" SelectedItem="{Binding Sound}" IsEnabled="{Binding CanEdit}"
+                  HorizontalAlignment="Stretch">
+          <ComboBox.ItemTemplate>
+            <DataTemplate x:DataType="vm:SoundOption">
+              <TextBlock Text="{Binding Label}" />
+            </DataTemplate>
+          </ComboBox.ItemTemplate>
+        </ComboBox>
+        <TextBox Text="{Binding SoundData}" IsEnabled="{Binding CanEdit}"
+                 Watermark="Text to speak, or the path of a sound file" />
+        <WrapPanel>
+          <Button Content="Test" Command="{Binding TestCommand}" Margin="0,0,6,6" />
+          <Button Content="Save" Command="{Binding SaveCommand}" Classes="accent" Margin="0,0,6,6" />
+          <Button Content="New" Command="{Binding NewCommand}" Margin="0,0,6,6" />
+          <Button Content="Delete" Command="{Binding DeleteCommand}" Margin="0,0,6,6" />
+          <Button Content="Undo" Command="{Binding UndoCommand}" Margin="0,0,6,6" />
+        </WrapPanel>
+        <Button Content="Import ACT trigger from clipboard" Command="{Binding ImportFromClipboardCommand}"
+                HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" />
+        <TextBlock Text="{Binding Status}" TextWrapping="Wrap" Foreground="#FBBF24" FontSize="12" />
+        <TextBlock TextWrapping="Wrap" Classes="muted" FontSize="11" Margin="0,8,0,0"
+                   Text="Patterns match the message part of a log line (after the timestamp). Named groups like (?&lt;player&gt;\w+) can be spoken: write ${player} in the text." />
+      </StackPanel>
+    </ScrollViewer>
+  </Grid>
+</UserControl>

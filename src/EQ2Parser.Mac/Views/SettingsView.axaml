@@ -1,0 +1,74 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:EQ2Parser.Mac.ViewModels"
+             xmlns:svc="using:EQ2Parser.App.Services"
+             x:Class="EQ2Parser.Mac.Views.SettingsView"
+             x:DataType="vm:SettingsViewModel">
+  <ScrollViewer>
+    <StackPanel Spacing="18" Margin="4,10,16,16" MaxWidth="900" HorizontalAlignment="Left">
+
+      <!-- Logs -->
+      <StackPanel Spacing="6">
+        <TextBlock Text="Log folders" Classes="header" FontSize="15" />
+        <TextBlock Classes="muted" FontSize="12" TextWrapping="Wrap"
+                   Text="Every eq2log_*.txt in these folders is read as soon as EQ2 writes to it. In EQ2, type /log to turn logging on." />
+        <ListBox ItemsSource="{Binding WatchedFolders}" SelectedItem="{Binding SelectedFolder}"
+                 MinHeight="60" MaxHeight="140" Background="#1A1D27" FontSize="12" />
+        <WrapPanel>
+          <Button Content="Find in CrossOver / Wine" Command="{Binding DetectFoldersCommand}" Margin="0,0,6,0" />
+          <Button Content="Add folder…" Command="{Binding AddFolderCommand}" Margin="0,0,6,0" />
+          <Button Content="Remove" Command="{Binding RemoveFolderCommand}" />
+        </WrapPanel>
+      </StackPanel>
+
+      <StackPanel Spacing="6">
+        <TextBlock Text="Logs being read" Classes="header" FontSize="15" />
+        <DataGrid ItemsSource="{Binding Sources}" SelectedItem="{Binding SelectedSource}"
+                  MinHeight="60" MaxHeight="180" Background="#1A1D27">
+          <DataGrid.Columns>
+            <DataGridTextColumn Header="Character" Binding="{Binding Owner}" Width="140" />
+            <DataGridTextColumn Header="File" Binding="{Binding FileName}" Width="*" />
+            <DataGridTextColumn Header="State" Binding="{Binding State}" Width="*" />
+          </DataGrid.Columns>
+        </DataGrid>
+        <WrapPanel>
+          <Button Content="Add log…" Command="{Binding AddLogCommand}" Margin="0,0,6,0" />
+          <CheckBox Content="Parse the whole file (older fights too)" IsChecked="{Binding ParseFromStart}" Margin="0,0,12,0" />
+          <Button Content="Stop reading" Command="{Binding RemoveLogCommand}" />
+        </WrapPanel>
+      </StackPanel>
+
+      <!-- Voice -->
+      <StackPanel Spacing="6">
+        <TextBlock Text="Alert voice" Classes="header" FontSize="15" />
+        <TextBlock Classes="muted" FontSize="12" TextWrapping="Wrap"
+                   Text="macOS voices. Better ones (Enhanced / Premium) can be downloaded under System Settings → Accessibility → Spoken Content → System voice → Manage Voices." />
+        <ComboBox ItemsSource="{Binding Voices}" SelectedItem="{Binding SelectedVoice}" MinWidth="360"
+                  PlaceholderText="System default voice">
+          <ComboBox.ItemTemplate>
+            <DataTemplate x:DataType="svc:TtsVoice">
+              <TextBlock Text="{Binding DisplayName}" />
+            </DataTemplate>
+          </ComboBox.ItemTemplate>
+        </ComboBox>
+        <Grid ColumnDefinitions="110,260,50" RowDefinitions="Auto,Auto">
+          <TextBlock Text="Speaking rate" VerticalAlignment="Center" />
+          <Slider Grid.Column="1" Minimum="0.5" Maximum="2" Value="{Binding TtsRate}" />
+          <TextBlock Grid.Column="2" Text="{Binding TtsRate, StringFormat={}{0:0.0}×}" VerticalAlignment="Center" Margin="8,0" />
+          <TextBlock Grid.Row="1" Text="Alert volume" VerticalAlignment="Center" />
+          <Slider Grid.Row="1" Grid.Column="1" Minimum="0" Maximum="1" Value="{Binding AlertVolume}" />
+          <TextBlock Grid.Row="1" Grid.Column="2" Text="{Binding AlertVolume, StringFormat={}{0:P0}}" VerticalAlignment="Center" Margin="8,0" />
+        </Grid>
+        <Grid ColumnDefinitions="*,Auto">
+          <TextBox Text="{Binding TestPhrase}" />
+          <Button Grid.Column="1" Content="Test voice" Command="{Binding TestVoiceCommand}" Margin="6,0,0,0" />
+        </Grid>
+      </StackPanel>
+
+      <StackPanel Spacing="4">
+        <TextBlock Text="{Binding Status}" Foreground="#FBBF24" FontSize="12" TextWrapping="Wrap" />
+        <TextBlock Text="{Binding DataFolder, StringFormat=App data: {0}}" Classes="muted" FontSize="11" />
+      </StackPanel>
+    </StackPanel>
+  </ScrollViewer>
+</UserControl>
