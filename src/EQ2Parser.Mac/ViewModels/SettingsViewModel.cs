@@ -168,11 +168,12 @@ public sealed partial class SettingsViewModel : ObservableObject
         UploadStatus = await _manager.Uploads.TestTokenAsync();
     }
 
-    /// <summary>Forget the token: settings drop the marker and auto-upload
-    /// goes off. The Keychain entry is left for the next Save to overwrite.</summary>
+    /// <summary>Forget the token: deleted from the Keychain, settings drop
+    /// the marker and auto-upload goes off.</summary>
     [RelayCommand]
     private void ClearUploadToken()
     {
+        TokenProtector.Forget();
         _manager.Settings = _manager.Settings with { LexiconApiTokenProtected = null, UploadEnabled = false };
         _manager.Settings.Save();
         _loadingUpload = true;

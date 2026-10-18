@@ -59,6 +59,22 @@ internal static partial class TokenProtector
         }
     }
 
+    /// <summary>Delete the stored token, if any. True when nothing is
+    /// stored any more.</summary>
+    public static bool Forget()
+    {
+        if (!OperatingSystem.IsMacOS())
+            return true;
+        try
+        {
+            return Keychain.Delete(Service, Account);
+        }
+        catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException)
+        {
+            return false;
+        }
+    }
+
     /// <summary>The classic generic-password calls of Security.framework:
     /// small, stable, and enough for one secret.</summary>
     [SupportedOSPlatform("macos")]
@@ -85,6 +101,27 @@ internal static partial class TokenProtector
                 _ = SecKeychainItemFreeContent(IntPtr.Zero, data);
                 if (item != IntPtr.Zero)
                     CFRelease(item);
+            }
+        }
+
+        public static bool Delete(string service, string account)
+        {
+            var s = Encoding.UTF8.GetBytes(service);
+            var a = Encoding.UTF8.GetBytes(account);
+            var status = SecKeychainFindGenericPassword(IntPtr.Zero, (uint)s.Length, s, (uint)a.Length, a,
+                out _, out var data, out var item);
+            if (status == ErrSecItemNotFound)
+                return true;
+            if (status != 0)
+                return false;
+            _ = SecKeychainItemFreeContent(IntPtr.Zero, data);
+            try
+            {
+                return SecKeychainItemDelete(item) == 0;
+            }
+            finally
+            {
+                CFRelease(item);
             }
         }
 
@@ -129,6 +166,9 @@ internal static partial class TokenProtector
         [LibraryImport(Security)]
         private static partial int SecKeychainItemModifyAttributesAndData(IntPtr itemRef,
             IntPtr attrList, uint length, byte[] data);
+
+        [LibraryImport(Security)]
+        private static partial int SecKeychainItemDelete(IntPtr itemRef);
 
         [LibraryImport(Security)]
         private static partial int SecKeychainItemFreeContent(IntPtr attrList, IntPtr data);
