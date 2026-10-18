@@ -565,12 +565,21 @@ public sealed class RaidTrackingTests
     // ── LogPaths.ParseInstallDir ────────────────────────────────────────────
 
     [Theory]
-    [InlineData(@"D:\SteamLibrary\steamapps\common\EverQuest 2\logs\Varsoon\eq2log_Menludiir.txt", @"D:\SteamLibrary\steamapps\common\EverQuest 2")]
-    [InlineData(@"C:\EQ2\logs\eq2log.txt", @"C:\EQ2")]
-    [InlineData(@"C:\SomewhereElse\eq2log_Menludiir.txt", null)]
+    [InlineData("/home/u/EverQuest 2/logs/Varsoon/eq2log_Menludiir.txt", "/home/u/EverQuest 2")]
+    [InlineData("/home/u/EQ2/logs/eq2log.txt", "/home/u/EQ2")]
+    [InlineData("/home/u/SomewhereElse/eq2log_Menludiir.txt", null)]
     [InlineData("", null)]
     [InlineData(null, null)]
     public void ParseInstallDir_Cases(string? logPath, string? expected)
+    {
+        Assert.Equal(expected, LogPaths.ParseInstallDir(logPath));
+    }
+
+    [WindowsTheory]
+    [InlineData(@"D:\SteamLibrary\steamapps\common\EverQuest 2\logs\Varsoon\eq2log_Menludiir.txt", @"D:\SteamLibrary\steamapps\common\EverQuest 2")]
+    [InlineData(@"C:\EQ2\logs\eq2log.txt", @"C:\EQ2")]
+    [InlineData(@"C:\SomewhereElse\eq2log_Menludiir.txt", null)]
+    public void ParseInstallDir_Windows_Paths(string logPath, string? expected)
     {
         Assert.Equal(expected, LogPaths.ParseInstallDir(logPath));
     }

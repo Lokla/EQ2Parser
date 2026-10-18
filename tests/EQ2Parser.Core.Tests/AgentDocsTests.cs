@@ -12,7 +12,7 @@ public class AgentDocsTests
 {
     /// <summary>A backticked token is checked when it starts with one of
     /// these. Anything else in backticks (symbols, commands, paths in the
-    /// sibling EQ2Lexicon repo, build output under artifacts/) is left alone.</summary>
+    /// sibling EQ2Lexicon repo, build output under artifacts/, bin/ or obj/) is left alone.</summary>
     private static readonly string[] RepoPrefixes =
     [
         "src/", "tests/", "scripts/", "docs/", ".github/", ".githooks/", ".claude/",
@@ -53,6 +53,10 @@ public class AgentDocsTests
             return null;
         // `path/File.cs:42` style references: check the file part.
         t = Regex.Replace(t, @":\d+(-\d+)?$", "");
+        // Build output (bin/, obj/) exists only after a build of that
+        // project — the WPF app is never built on macOS or Linux.
+        if (Regex.IsMatch(t, @"/(bin|obj)(/|$)"))
+            return null;
         if (RootFiles.Contains(t, StringComparer.Ordinal))
             return t;
         return RepoPrefixes.Any(p => t.StartsWith(p, StringComparison.Ordinal)) ? t : null;

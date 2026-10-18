@@ -11,17 +11,29 @@ namespace EQ2Parser.Core.Tests;
 public class LogPathsTests
 {
     [Theory]
-    [InlineData(@"C:\EQ2\logs\Varsoon\eq2log_Kayleigh.txt", "Varsoon")]
-    [InlineData(@"C:\EQ2\logs\Antonia Bayle\eq2log_Bob.txt", "Antonia Bayle")]
     [InlineData("/home/u/eq2/logs/Varsoon/eq2log_X.txt", "Varsoon")]
-    [InlineData(@"C:\EQ2\logs\eq2log_Kayleigh.txt", "")] // legacy layout — parent is "logs"
-    [InlineData(@"C:\EQ2\LOGS\eq2log_K.txt", "")] //         …case-insensitively
+    [InlineData("/home/u/eq2/logs/Antonia Bayle/eq2log_Bob.txt", "Antonia Bayle")]
+    // A CrossOver bottle on macOS: the Windows install tree under drive_c.
+    [InlineData("/Users/u/Library/Application Support/CrossOver/Bottles/EverQuest II/drive_c/users/Public/Daybreak Game Company/Installed Games/EverQuest II/logs/Wuoshi/eq2log_Vorath.txt", "Wuoshi")]
+    [InlineData("/home/u/eq2/logs/eq2log_K.txt", "")] //      legacy layout — parent is "logs"
+    [InlineData("/home/u/eq2/LOGS/eq2log_K.txt", "")] //      …case-insensitively
     [InlineData("eq2log_K.txt", "")] //                      no directory at all
-    [InlineData(@"C:\", "")]
+    [InlineData("/", "")]
     [InlineData("", "")]
     [InlineData("   ", "")]
     [InlineData(null, "")]
     public void Server_Is_The_Parent_Directory_Unless_Its_The_Logs_Root(string? path, string expected) =>
+        Assert.Equal(expected, LogPaths.ParseServerName(path));
+
+    /// <summary>The same rule on Windows path syntax, which only Windows'
+    /// Path splits on backslashes.</summary>
+    [WindowsTheory]
+    [InlineData(@"C:\EQ2\logs\Varsoon\eq2log_Kayleigh.txt", "Varsoon")]
+    [InlineData(@"C:\EQ2\logs\Antonia Bayle\eq2log_Bob.txt", "Antonia Bayle")]
+    [InlineData(@"C:\EQ2\logs\eq2log_Kayleigh.txt", "")] // legacy layout — parent is "logs"
+    [InlineData(@"C:\EQ2\LOGS\eq2log_K.txt", "")] //         …case-insensitively
+    [InlineData(@"C:\", "")]
+    public void Server_Is_The_Parent_Directory_On_Windows_Paths(string path, string expected) =>
         Assert.Equal(expected, LogPaths.ParseServerName(path));
 
     [Fact]

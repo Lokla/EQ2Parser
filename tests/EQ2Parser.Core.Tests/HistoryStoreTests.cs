@@ -859,13 +859,14 @@ public sealed class HistoryStoreTests : IDisposable
         Assert.Equal("second wal", File.ReadAllText(second + "-wal"));
     }
 
-    [Fact]
+    [WindowsFact]
     public void Quarantine_That_Cannot_Finish_Puts_The_Database_Back()
     {
         // The main file moved but a sibling would not (another handle on
         // it): a database separated from its WAL has lost whatever the WAL
         // held, and a fresh database beside a stranger's WAL is worse. So
-        // the move is undone and the caller is told.
+        // the move is undone and the caller is told. Windows-only: an open
+        // handle blocks a move there; POSIX renames an open file freely.
         var path = Path.Combine(_dir, "history.db");
         File.WriteAllText(path, "main");
         File.WriteAllText(path + "-wal", "wal");
