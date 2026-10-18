@@ -23,7 +23,7 @@ dotnet_diagnostic.CA1711.severity = none
 # format bugs (ACT share XML with locale digits). The App override below
 # relaxes it for UI display strings only.
 
-[src/EQ2Parser.App/**.cs]
+[{src/EQ2Parser.App/**.cs,src/EQ2Parser.Shell/**.cs,src/EQ2Parser.Mac/**.cs}]
 # UI display strings: current-culture formatting is the CORRECT default for
 # text the user reads (dates, durations, counts follow their locale).
 # Demanding an explicit provider at every ToString in the WPF layer is

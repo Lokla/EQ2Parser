@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The platform-neutral half of EQ2Parser.App, for non-Windows shells
+       (EQ2Parser.Mac). It owns no copies: the services are compiled from
+       the WPF app's own source files, linked below, so a fix upstream
+       lands here with the next merge. Only the platform seams live in
+       this project's own folder. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>EQ2Parser.App</RootNamespace>
+    <!-- LibraryImport (the Keychain calls) generates unsafe marshalling code. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <AppDir>..\EQ2Parser.App\</AppDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\EQ2Parser.Core\EQ2Parser.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="$(AppDir)Localization\Loc.cs" Link="Linked\Localization\Loc.cs" />
+    <Compile Include="$(AppDir)Services\AppSettings.cs" Link="Linked\Services\AppSettings.cs" />
+    <Compile Include="$(AppDir)Services\SourceManager.cs" Link="Linked\Services\SourceManager.cs" />
+    <Compile Include="$(AppDir)Services\LogSource.cs" Link="Linked\Services\LogSource.cs" />
+    <Compile Include="$(AppDir)Services\TriggerService.cs" Link="Linked\Services\TriggerService.cs" />
+    <Compile Include="$(AppDir)Services\TimerService.cs" Link="Linked\Services\TimerService.cs" />
+    <Compile Include="$(AppDir)Services\HistoryService.cs" Link="Linked\Services\HistoryService.cs" />
+    <Compile Include="$(AppDir)Services\UploadService.cs" Link="Linked\Services\UploadService.cs" />
+    <Compile Include="$(AppDir)Services\LexiconSyncService.cs" Link="Linked\Services\LexiconSyncService.cs" />
+    <Compile Include="$(AppDir)Services\RaidBossSyncService.cs" Link="Linked\Services\RaidBossSyncService.cs" />
+    <Compile Include="$(AppDir)Services\Eq2LogLocator.cs" Link="Linked\Services\Eq2LogLocator.cs" />
+    <Compile Include="$(AppDir)Services\UndoService.cs" Link="Linked\Services\UndoService.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Same manifest names as the WPF assembly, which Loc looks them up by. -->
+    <EmbeddedResource Include="$(AppDir)Localization\strings.*.json" Link="Linked\Localization\%(Filename)%(Extension)"
+                      LogicalName="EQ2Parser.App.Localization.%(Filename)%(Extension)" WithCulture="false" />
+  </ItemGroup>
+
+</Project>
