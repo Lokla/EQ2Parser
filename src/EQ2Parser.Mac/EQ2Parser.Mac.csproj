@@ -24,6 +24,8 @@
     <!-- The off-screen renderer behind the snapshot mode (Program.cs). -->
     <PackageReference Include="Avalonia.Headless" Version="11.3.22" />
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
+    <!-- The chart stack of the WPF app, its Avalonia flavour, same version. -->
+    <PackageReference Include="LiveChartsCore.SkiaSharpView.Avalonia" Version="2.0.0-rc5.4" />
   </ItemGroup>
 
 </Project>

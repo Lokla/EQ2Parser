@@ -17,8 +17,15 @@ public sealed record SwingData(
     DateTimeOffset Time, string Attacker, string Victim, string Ability, string Damage, long Number,
     bool Critical, string Type, string Special);
 
-/// <summary>What the drill shows at its current depth.</summary>
-public sealed record DrillData(string Title, List<AbilityData>? Table, List<SwingData>? Swings);
+/// <summary>A line of the depth-1 chart: a bucket's rate per time slot.</summary>
+public sealed record ChartLine(string Name, string ColorHex, double[] Rates);
+
+/// <summary>What the drill shows at its current depth: the table or the
+/// swings, plus the chart — lines over time (depth 1) or the abilities'
+/// shares (depth 2).</summary>
+public sealed record DrillData(
+    string Title, List<AbilityData>? Table, List<SwingData>? Swings,
+    List<ChartLine>? Lines = null, double SlotSeconds = 0, List<(string Name, double Value)>? Slices = null);
 
 /// <summary>
 /// The combatant drill-down, by the WPF app's rules
@@ -62,14 +69,75 @@ public static class Drill
         var seconds = fight.DisplaySeconds;
 
         if (bucketName is null)
-            return new DrillData(who, Buckets(instances, seconds), null);
+        {
+            var (lines, slotSeconds) = BucketLines(fight, instances);
+            return new DrillData(who, Buckets(instances, seconds), null, lines, slotSeconds);
+        }
         var isAuto = bucketName == BucketConfig.AutoAttackOut;
         if (ability is null)
         {
-            return new DrillData($"{who}  ›  {BucketLabel(bucketName)}",
-                isAuto ? AutoGroups(instances, seconds) : Abilities(instances, bucketName, seconds), null);
+            var table = isAuto ? AutoGroups(instances, seconds) : Abilities(instances, bucketName, seconds);
+            return new DrillData($"{who}  ›  {BucketLabel(bucketName)}", table, null, Slices: Slices(table));
         }
         return new DrillData($"{who}  ›  {BucketLabel(bucketName)}  ›  {ability}", null, Swings(instances, bucketName, ability, isAuto));
+    }
+
+    /// <summary>The depth-1 chart's buckets and colours (the WPF drill's).</summary>
+    private static readonly (string Bucket, string Hex)[] LineBuckets =
+    [
+        (BucketConfig.AutoAttackOut, "#C8A96E"),
+        (BucketConfig.SkillOut, "#93B4FF"),
+        (BucketConfig.HealedOut, "#4ADE80"),
+        (BucketConfig.PowerDrainOut, "#00E5FF"),
+        (BucketConfig.PowerReplenishOut, "#22D3EE"),
+        (BucketConfig.CureOut, "#E8BBFF"),
+        (BucketConfig.ThreatOut, "#F87171"),
+    ];
+
+    /// <summary>Per-bucket rate over the fight: amounts summed into time
+    /// slots of 2–30 s (about 60 slots a fight), divided by the slot length
+    /// — the WPF drill chart's window and rule.</summary>
+    private static (List<ChartLine>? Lines, double SlotSeconds) BucketLines(IFightView fight, List<Combatant> instances)
+    {
+        var duration = Math.Max(1, (fight.EndTime - fight.StartTime).TotalSeconds);
+        var slotSeconds = Math.Clamp(Math.Ceiling(duration / 60), 2, 30);
+        var slots = (int)(duration / slotSeconds) + 1;
+        List<ChartLine> lines = [];
+        foreach (var (bucketName, hex) in LineBuckets)
+        {
+            var rates = new double[slots];
+            foreach (var combatant in instances)
+            {
+                if (combatant.OutgoingBuckets.GetValueOrDefault(bucketName) is not { } bucket)
+                    continue;
+                foreach (var swing in bucket.All.Swings)
+                {
+                    if (swing.Damage.Number <= 0)
+                        continue;
+                    var slot = (int)((swing.Time - fight.StartTime).TotalSeconds / slotSeconds);
+                    if (slot >= 0 && slot < rates.Length)
+                        rates[slot] += swing.Damage.Number;
+                }
+            }
+            if (!rates.Any(r => r > 0))
+                continue;
+            for (var i = 0; i < rates.Length; i++)
+                rates[i] /= slotSeconds;
+            lines.Add(new ChartLine(BucketLabel(bucketName), hex, rates));
+        }
+        return (lines.Count > 0 ? lines : null, slotSeconds);
+    }
+
+    /// <summary>The abilities' shares: the eleven largest and the rest as
+    /// "Other" (the headline "All" row left out).</summary>
+    private static List<(string, double)>? Slices(List<AbilityData> table)
+    {
+        var ranked = table.Where(t => !t.IsDivider && t.Source != "all" && t.Total > 0).OrderByDescending(t => t.Total).ToList();
+        List<(string, double)> slices = [.. ranked.Take(11).Select(t => (t.Name, (double)t.Total))];
+        var rest = ranked.Skip(11).Sum(t => t.Total);
+        if (rest > 0)
+            slices.Add(("Other", rest));
+        return slices.Count > 1 ? slices : null;
     }
 
     public static string BucketLabel(string bucket) => bucket.Replace(" (Out)", "", StringComparison.Ordinal);

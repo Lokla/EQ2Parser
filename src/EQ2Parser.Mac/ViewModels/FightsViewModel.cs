@@ -127,6 +127,29 @@ public sealed partial class FightsViewModel(SourceManager manager) : ObservableO
     [ObservableProperty]
     private string _drillHint = "";
 
+    [ObservableProperty]
+    private LiveChartsCore.ISeries[] _drillLineSeries = [];
+
+    [ObservableProperty]
+    private LiveChartsCore.SkiaSharpView.Axis[] _drillXAxes = DrillCharts.TimeAxis(1);
+
+    [ObservableProperty]
+    private LiveChartsCore.SkiaSharpView.Axis[] _drillYAxes = DrillCharts.RateAxis();
+
+    [ObservableProperty]
+    private LiveChartsCore.ISeries[] _drillPieSeries = [];
+
+    [ObservableProperty]
+    private bool _drillShowsLines;
+
+    [ObservableProperty]
+    private bool _drillShowsPie;
+
+    public LiveChartsCore.SkiaSharpView.Painting.SolidColorPaint ChartTextPaint { get; } = DrillCharts.TextPaint;
+    public LiveChartsCore.SkiaSharpView.Painting.SolidColorPaint ChartTooltipBackground { get; } = DrillCharts.TooltipBackground;
+
+    private double _chartSig = double.NaN;
+
     private string? _drillKey;
     private string? _drillBucket;
     private string? _drillAbility;
@@ -244,10 +267,31 @@ public sealed partial class FightsViewModel(SourceManager manager) : ObservableO
             ApplyDrill(drill);
     }
 
+    /// <summary>The chart strip: rebuilt only when its numbers changed, so
+    /// a finished fight's chart stays still and a live one follows the tick.</summary>
+    private void ApplyDrillChart(DrillData drill)
+    {
+        DrillShowsLines = drill.Lines is not null;
+        DrillShowsPie = drill.Slices is not null;
+        var sig = (drill.Lines?.Sum(l => l.Rates.Sum()) ?? 0) * 7 + (drill.Slices?.Sum(x => x.Value) ?? 0)
+            + (_drillBucket?.Length ?? -1) * 0.001 + drill.SlotSeconds;
+        if (sig.Equals(_chartSig))
+            return;
+        _chartSig = sig;
+        if (drill.Lines is { } lines)
+        {
+            DrillXAxes = DrillCharts.TimeAxis(drill.SlotSeconds);
+            DrillLineSeries = DrillCharts.Lines(lines);
+        }
+        if (drill.Slices is { } slices)
+            DrillPieSeries = DrillCharts.Slices(slices);
+    }
+
     private void ApplyDrill(DrillData? drill)
     {
         if (drill is null)
         {
+            DrillShowsLines = DrillShowsPie = false;
             DrillTitle = "Not in this fight";
             DrillHint = "The combatant is not part of the fight shown. Back or Close returns to the fight.";
             AbilityRows.Clear();
@@ -256,6 +300,7 @@ public sealed partial class FightsViewModel(SourceManager manager) : ObservableO
         }
         DrillTitle = drill.Title;
         DrillShowsSwings = drill.Swings is not null;
+        ApplyDrillChart(drill);
         if (drill.Table is { } table)
         {
             SwingRows.Clear();

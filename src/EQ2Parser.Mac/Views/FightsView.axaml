@@ -1,6 +1,7 @@
 <UserControl xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:vm="using:EQ2Parser.Mac.ViewModels"
+             xmlns:lvc="using:LiveChartsCore.SkiaSharpView.Avalonia"
              x:Class="EQ2Parser.Mac.Views.FightsView"
              x:DataType="vm:FightsViewModel">
   <Grid ColumnDefinitions="270,6,*" Margin="0,8,0,8">
@@ -81,7 +82,7 @@
       </Grid>
 
       <!-- The drill-down: buckets, abilities, swings. -->
-      <Grid Grid.Row="1" RowDefinitions="Auto,Auto,*" IsVisible="{Binding DrillOpen}">
+      <Grid Grid.Row="1" RowDefinitions="Auto,Auto,Auto,*" IsVisible="{Binding DrillOpen}">
         <Grid ColumnDefinitions="Auto,*,Auto" Margin="0,0,0,6">
           <Button Content="‹ Back" Command="{Binding DrillBackCommand}" Padding="10,3" FontSize="12" />
           <TextBlock Grid.Column="1" Text="{Binding DrillTitle}" Classes="header" FontSize="14" VerticalAlignment="Center"
@@ -89,7 +90,20 @@
           <Button Grid.Column="2" Content="Close" Command="{Binding DrillCloseCommand}" Padding="10,3" FontSize="12" />
         </Grid>
         <TextBlock Grid.Row="1" Text="{Binding DrillHint}" Classes="muted" FontSize="11" Margin="0,0,0,4" />
-        <DataGrid Grid.Row="2" x:Name="AbilityGrid" ItemsSource="{Binding AbilityRows}" Background="#1A1D27"
+        <Border Grid.Row="2" Background="#1A1D27" CornerRadius="4" Height="200" Margin="0,0,0,6" Padding="4"
+                IsVisible="{Binding DrillShowsLines}">
+          <lvc:CartesianChart Series="{Binding DrillLineSeries}" XAxes="{Binding DrillXAxes}" YAxes="{Binding DrillYAxes}"
+                              LegendPosition="Right" LegendTextPaint="{Binding ChartTextPaint}"
+                              TooltipTextPaint="{Binding ChartTextPaint}" TooltipBackgroundPaint="{Binding ChartTooltipBackground}"
+                              AnimationsSpeed="0:0:0" />
+        </Border>
+        <Border Grid.Row="2" Background="#1A1D27" CornerRadius="4" Height="220" Margin="0,0,0,6" Padding="4"
+                IsVisible="{Binding DrillShowsPie}">
+          <lvc:PieChart Series="{Binding DrillPieSeries}" LegendPosition="Right" LegendTextPaint="{Binding ChartTextPaint}"
+                        TooltipTextPaint="{Binding ChartTextPaint}" TooltipBackgroundPaint="{Binding ChartTooltipBackground}"
+                        AnimationsSpeed="0:0:0" />
+        </Border>
+        <DataGrid Grid.Row="3" x:Name="AbilityGrid" ItemsSource="{Binding AbilityRows}" Background="#1A1D27"
                   IsVisible="{Binding !DrillShowsSwings}" DoubleTapped="OnAbilityDoubleTapped">
           <DataGrid.Columns>
             <DataGridTemplateColumn Header="Name" Width="2.6*">
@@ -115,7 +129,7 @@
             <DataGridTextColumn Header="Types" Binding="{Binding Types}" Width="*" />
           </DataGrid.Columns>
         </DataGrid>
-        <DataGrid Grid.Row="2" ItemsSource="{Binding SwingRows}" Background="#1A1D27" IsVisible="{Binding DrillShowsSwings}">
+        <DataGrid Grid.Row="3" ItemsSource="{Binding SwingRows}" Background="#1A1D27" IsVisible="{Binding DrillShowsSwings}">
           <DataGrid.Columns>
             <DataGridTextColumn Header="Time" Binding="{Binding Time}" Width="84" />
             <DataGridTextColumn Header="Attacker" Binding="{Binding Attacker}" Width="*" />
