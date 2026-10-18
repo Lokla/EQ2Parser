@@ -65,6 +65,32 @@
         </Grid>
       </StackPanel>
 
+      <!-- EQ2Lexicon -->
+      <StackPanel Spacing="6">
+        <TextBlock Text="EQ2Lexicon" Classes="header" FontSize="15" />
+        <Border Background="#7F1D1D" CornerRadius="4" Padding="8,4" IsVisible="{Binding LoopbackOnly}">
+          <TextBlock Foreground="White" FontSize="12" TextWrapping="Wrap"
+                     Text="Test run (EQ2PARSER_LOOPBACK_ONLY): every request to anything but this machine is refused — nothing reaches the real site." />
+        </Border>
+        <TextBlock Text="{Binding LexiconUrl, StringFormat=Site: {0}}" Classes="muted" FontSize="12" />
+        <CheckBox Content="Use the EQ2Lexicon trigger pack" IsChecked="{Binding LexiconTriggersEnabled}" />
+        <TextBlock Text="Parse uploads" FontWeight="SemiBold" Margin="0,6,0,0" />
+        <TextBlock Classes="muted" FontSize="12" TextWrapping="Wrap"
+                   Text="Paste your API token from your EQ2Lexicon profile. It is kept in your macOS Keychain, never in the settings file. Only logs under logs/&lt;server&gt;/ are uploaded." />
+        <Grid ColumnDefinitions="*,Auto,Auto,Auto">
+          <TextBox x:Name="TokenBox" PasswordChar="•" Watermark="API token" />
+          <Button Grid.Column="1" Content="Save token" Command="{Binding SaveUploadTokenCommand}"
+                  CommandParameter="{Binding #TokenBox}" Margin="6,0,0,0" />
+          <Button Grid.Column="2" Content="Test" Command="{Binding TestUploadTokenCommand}" Margin="6,0,0,0" />
+          <Button Grid.Column="3" Content="Remove" Command="{Binding ClearUploadTokenCommand}" Margin="6,0,0,0" />
+        </Grid>
+        <TextBlock Text="{Binding UploadTokenState}" Classes="muted" FontSize="12" />
+        <CheckBox Content="Upload every finished fight automatically" IsChecked="{Binding UploadEnabled}" />
+        <CheckBox Content="…but only raid fights (raid bosses, or 7+ players)" IsChecked="{Binding UploadRaidOnly}"
+                  IsEnabled="{Binding UploadEnabled}" Margin="24,0,0,0" />
+        <TextBlock Text="{Binding UploadStatus}" Foreground="#FBBF24" FontSize="12" TextWrapping="Wrap" />
+      </StackPanel>
+
       <StackPanel Spacing="4">
         <TextBlock Text="{Binding Status}" Foreground="#FBBF24" FontSize="12" TextWrapping="Wrap" />
         <TextBlock Text="{Binding DataFolder, StringFormat=App data: {0}}" Classes="muted" FontSize="11" />

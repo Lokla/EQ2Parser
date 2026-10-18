@@ -102,3 +102,24 @@ public sealed class TokenProtectorTests
     public void Anything_But_The_Keychain_Marker_Reads_As_No_Token(string? stored) =>
         Assert.Null(TokenProtector.Unprotect(stored));
 }
+
+[Collection(nameof(DefaultProxyCollection))] // flips process-wide state: runs alone
+public sealed class TokenProtectorScopeTests
+{
+    [Fact]
+    public void A_Run_With_Its_Own_Data_Folder_Uses_Its_Own_Keychain_Entry()
+    {
+        var saved = Environment.GetEnvironmentVariable("EQ2PARSER_DATA_DIR");
+        try
+        {
+            Environment.SetEnvironmentVariable("EQ2PARSER_DATA_DIR", "/tmp/some-test-run");
+            Assert.Equal("EQ2Parser (/tmp/some-test-run)", TokenProtector.Service);
+            Environment.SetEnvironmentVariable("EQ2PARSER_DATA_DIR", null);
+            Assert.Equal("EQ2Parser", TokenProtector.Service);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("EQ2PARSER_DATA_DIR", saved);
+        }
+    }
+}

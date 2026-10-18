@@ -20,7 +20,10 @@ public sealed class App : Application
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
             var settings = AppSettings.Load();
-            Loc.Initialize(settings.LanguageCode);
+            // The Mac pages are English-only so far; following the OS
+            // language would mix a German status line into English pages.
+            // An explicit choice in settings.json still applies.
+            Loc.Initialize(settings.LanguageCode.Length > 0 ? settings.LanguageCode : "en");
             var manager = new SourceManager(settings);
             SessionJournal.Mark("settings + localization loaded");
             manager.RestoreHistory();

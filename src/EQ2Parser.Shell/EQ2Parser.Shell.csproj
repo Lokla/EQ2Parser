@@ -18,6 +18,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="EQ2Parser.Shell.Tests" />
+    <InternalsVisibleTo Include="EQ2Parser" /> <!-- the Mac app (its assembly name) -->
   </ItemGroup>
 
   <ItemGroup>

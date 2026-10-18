@@ -1,6 +1,9 @@
 using System.Collections.ObjectModel;
+using Avalonia.Controls;
+using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using EQ2Parser.App.Localization;
 using EQ2Parser.App.Services;
 
 namespace EQ2Parser.Mac.ViewModels;
@@ -50,6 +53,32 @@ public sealed partial class SettingsViewModel : ObservableObject
 
     public string DataFolder { get; } = AppSettings.Directory;
 
+    // ---- EQ2Lexicon: trigger pack and parse uploads ----
+
+    public string LexiconUrl => _manager.Settings.LexiconBaseUrl;
+
+    /// <summary>Set when the run refuses every non-loopback request
+    /// (LoopbackOnlyGuard) — shown so a test window is never mistaken for
+    /// one that uploads.</summary>
+    public bool LoopbackOnly { get; } = LoopbackOnlyGuard.IsRequested;
+
+    [ObservableProperty]
+    private bool _lexiconTriggersEnabled;
+
+    [ObservableProperty]
+    private bool _uploadEnabled;
+
+    [ObservableProperty]
+    private bool _uploadRaidOnly;
+
+    [ObservableProperty]
+    private string _uploadStatus = "";
+
+    [ObservableProperty]
+    private string _uploadTokenState = "";
+
+    private bool _loadingUpload;
+
     public SettingsViewModel(SourceManager manager, Func<Task<string?>> pickFolder, Func<Task<string?>> pickLog)
     {
         _manager = manager;
@@ -60,6 +89,98 @@ public sealed partial class SettingsViewModel : ObservableObject
         _ttsRate = manager.Settings.TtsRate;
         _alertVolume = manager.Settings.AlertVolume;
         ReloadFolders();
+
+        _loadingUpload = true;
+        LexiconTriggersEnabled = manager.Settings.LexiconTriggersEnabled;
+        UploadEnabled = manager.Settings.UploadEnabled;
+        UploadRaidOnly = manager.Settings.UploadRaidOnly;
+        _loadingUpload = false;
+        UploadTokenState = TokenProtector.Unprotect(manager.Settings.LexiconApiTokenProtected) is null
+            ? Loc.Get("SettingsVm_NoTokenSaved")
+            : Loc.Get("SettingsVm_TokenSavedState");
+        UploadStatus = manager.Uploads.Status;
+        manager.Uploads.StatusChanged += () => Dispatcher.UIThread.Post(() => UploadStatus = manager.Uploads.Status);
+    }
+
+    partial void OnLexiconTriggersEnabledChanged(bool value)
+    {
+        if (_loadingUpload)
+            return;
+        _manager.Settings = _manager.Settings with { LexiconTriggersEnabled = value };
+        _manager.Settings.Save();
+        _ = _manager.Lexicon.SetEnabledAsync(value);
+    }
+
+    partial void OnUploadEnabledChanged(bool value)
+    {
+        if (_loadingUpload)
+            return;
+        _manager.Settings = _manager.Settings with { UploadEnabled = value };
+        _manager.Settings.Save();
+        ReconfigureUploads();
+    }
+
+    partial void OnUploadRaidOnlyChanged(bool value)
+    {
+        if (_loadingUpload)
+            return;
+        _manager.Settings = _manager.Settings with { UploadRaidOnly = value };
+        _manager.Settings.Save();
+        ReconfigureUploads();
+    }
+
+    private void ReconfigureUploads() =>
+        _manager.Uploads.Configure(
+            _manager.Settings.LexiconBaseUrl,
+            TokenProtector.Unprotect(_manager.Settings.LexiconApiTokenProtected),
+            _manager.Settings.UploadEnabled,
+            _manager.Settings.UploadRaidOnly);
+
+    /// <summary>The token box is passed in and cleared here, as the WPF
+    /// app does with its PasswordBox, so the token never sits in a bound
+    /// property. It goes straight to the Keychain.</summary>
+    [RelayCommand]
+    private void SaveUploadToken(TextBox? box)
+    {
+        var token = box?.Text?.Trim() ?? "";
+        if (token.Length == 0)
+        {
+            UploadStatus = Loc.Get("SettingsVm_PasteTokenFirst");
+            return;
+        }
+        if (TokenProtector.Protect(token) is not { } marker)
+        {
+            UploadStatus = "Couldn't store the token in the macOS Keychain.";
+            return;
+        }
+        box!.Text = "";
+        _manager.Settings = _manager.Settings with { LexiconApiTokenProtected = marker };
+        _manager.Settings.Save();
+        UploadTokenState = Loc.Get("SettingsVm_TokenSavedState");
+        ReconfigureUploads();
+        UploadStatus = Loc.Get("SettingsVm_TokenSavedHitTest");
+    }
+
+    [RelayCommand]
+    private async Task TestUploadToken()
+    {
+        UploadStatus = Loc.Get("SettingsVm_Testing");
+        UploadStatus = await _manager.Uploads.TestTokenAsync();
+    }
+
+    /// <summary>Forget the token: settings drop the marker and auto-upload
+    /// goes off. The Keychain entry is left for the next Save to overwrite.</summary>
+    [RelayCommand]
+    private void ClearUploadToken()
+    {
+        _manager.Settings = _manager.Settings with { LexiconApiTokenProtected = null, UploadEnabled = false };
+        _manager.Settings.Save();
+        _loadingUpload = true;
+        UploadEnabled = false;
+        _loadingUpload = false;
+        UploadTokenState = Loc.Get("SettingsVm_NoTokenSaved");
+        ReconfigureUploads();
+        UploadStatus = Loc.Get("SettingsVm_TokenRemoved");
     }
 
     partial void OnSelectedVoiceChanged(TtsVoice? value)

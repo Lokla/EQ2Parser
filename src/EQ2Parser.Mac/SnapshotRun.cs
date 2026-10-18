@@ -14,6 +14,8 @@ internal static class SnapshotRun
 {
     public static void Schedule(Window window, IClassicDesktopStyleApplicationLifetime desktop, string dir, double seconds)
     {
+        // Tall enough that long pages (Settings) render whole.
+        window.Height = 1400;
         window.Show();
         DispatcherTimer.RunOnce(() =>
         {

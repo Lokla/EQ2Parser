@@ -47,6 +47,8 @@ public sealed partial class MainViewModel : ObservableObject
                 });
                 return picked.Count > 0 ? picked[0].TryGetLocalPath() : null;
             });
+        manager.Uploads.StatusChanged += () =>
+            Dispatcher.UIThread.Post(() => Notification = manager.Uploads.Status);
         manager.CalloutAnnounced += text => Dispatcher.UIThread.Post(() => Notification = $"{DateTime.Now:HH:mm}  {text}");
         _timer = new DispatcherTimer(TimeSpan.FromSeconds(1), DispatcherPriority.Background, (_, _) => Tick());
         _timer.Start();
@@ -57,6 +59,7 @@ public sealed partial class MainViewModel : ObservableObject
     {
         Fights.Tick();
         Settings.Tick();
+        _manager.Uploads.TickAttendance(_manager, DateTimeOffset.Now);
         SessionJournal.Heartbeat(_manager.Sources.Count);
         var sources = _manager.Sources;
         StatusLine = sources.Count == 0

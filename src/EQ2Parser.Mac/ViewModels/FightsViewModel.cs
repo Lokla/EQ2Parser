@@ -82,7 +82,30 @@ public sealed partial class FightsViewModel(SourceManager manager) : ObservableO
     private string _breadcrumb = "No fights yet — waiting for combat in a watched log.";
 
     [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(UploadShownCommand))]
     private bool _isLive;
+
+    /// <summary>Send every source's view of the fight shown, the WPF fight
+    /// tree's "Upload to EQ2Lexicon": the explicit click is the consent, so
+    /// it works with auto-upload off. A fight in progress is not offered.</summary>
+    [RelayCommand(CanExecute = nameof(CanUploadShown))]
+    private void UploadShown()
+    {
+        List<Encounter> sources;
+        lock (manager.Sync)
+        {
+            sources = _shown switch
+            {
+                Core.Correlation.CorrelatedEncounter merged => [.. merged.Sources],
+                Encounter { Active: false } single => [single],
+                _ => [],
+            };
+        }
+        if (sources.Count > 0)
+            manager.Uploads.UploadFight(sources);
+    }
+
+    private bool CanUploadShown() => !IsLive && _shown is not null;
 
     partial void OnSelectedFightChanged(FightItem? value)
     {

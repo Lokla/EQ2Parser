@@ -17,8 +17,16 @@ internal static partial class TokenProtector
     /// <summary>What settings.json stores in place of the token.</summary>
     internal const string KeychainMarker = "macos-keychain:v1";
 
-    private const string Service = "EQ2Parser";
     private const string Account = "LexiconApiToken";
+
+    /// <summary>The Keychain service name. A run with its own data folder
+    /// (EQ2PARSER_DATA_DIR — tests, the e2e upload check) gets its own
+    /// entry, named after that folder, so it can never read or overwrite
+    /// the token of the real install.</summary>
+    internal static string Service =>
+        Environment.GetEnvironmentVariable("EQ2PARSER_DATA_DIR") is { Length: > 0 }
+            ? $"EQ2Parser ({AppSettings.Directory})"
+            : "EQ2Parser";
 
     /// <summary>Store the token; the settings value to keep, or null when
     /// it could not be stored.</summary>
