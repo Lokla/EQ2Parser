@@ -43,7 +43,38 @@ internal static class SnapshotRun
                 window.CaptureRenderedFrame()?.Save(path);
                 Console.WriteLine(path);
             }
+            // The drill, walked down from the top ally: buckets, then the
+            // first bucket's abilities, then the top ability's swings.
+            if (window.DataContext is ViewModels.MainViewModel main && main.Fights.Allies.Count > 0)
+            {
+                if (tabs is not null)
+                    tabs.SelectedIndex = 0;
+                var fights = main.Fights;
+                fights.OpenDrill(fights.Allies[0].Key);
+                Capture(window, dir, "drill-1-buckets");
+                if (fights.AbilityRows.FirstOrDefault(r => !r.IsDivider) is { } bucket)
+                {
+                    fights.DrillInto(bucket);
+                    Capture(window, dir, "drill-2-abilities");
+                    if (fights.AbilityRows.Skip(1).FirstOrDefault(r => !r.IsDivider) is { } ability)
+                    {
+                        fights.DrillInto(ability);
+                        Capture(window, dir, "drill-3-swings");
+                    }
+                }
+            }
             desktop.Shutdown();
         }, TimeSpan.FromSeconds(seconds));
+    }
+
+    private static void Capture(Window window, string dir, string name)
+    {
+        Dispatcher.UIThread.RunJobs();
+        AvaloniaHeadlessPlatform.ForceRenderTimerTick();
+        Dispatcher.UIThread.RunJobs();
+        AvaloniaHeadlessPlatform.ForceRenderTimerTick();
+        var path = Path.Combine(dir, name + ".png");
+        window.CaptureRenderedFrame()?.Save(path);
+        Console.WriteLine(path);
     }
 }

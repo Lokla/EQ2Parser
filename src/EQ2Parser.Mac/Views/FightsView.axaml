@@ -28,7 +28,7 @@
     <GridSplitter Grid.Column="1" Background="Transparent" ResizeDirection="Columns" />
 
     <!-- The fight shown -->
-    <Grid Grid.Column="2" RowDefinitions="Auto,2*,Auto,*">
+    <Grid Grid.Column="2" RowDefinitions="Auto,*">
       <Grid ColumnDefinitions="Auto,*,Auto" Margin="0,0,0,6">
         <Border Background="#4ADE80" CornerRadius="3" Padding="6,1" IsVisible="{Binding IsLive}" VerticalAlignment="Center"
                 Margin="0,0,8,0">
@@ -40,42 +40,94 @@
                 Padding="10,3" FontSize="12" Margin="8,0,0,0" />
       </Grid>
 
-      <DataGrid Grid.Row="1" ItemsSource="{Binding Allies}" Background="#1A1D27">
-        <DataGrid.Columns>
-          <DataGridTemplateColumn Header="Name" Width="2*">
-            <DataGridTemplateColumn.CellTemplate>
-              <DataTemplate x:DataType="vm:CombatantRowVm">
-                <Grid Margin="6,0">
-                  <ProgressBar Value="{Binding Bar}" Maximum="1" MinHeight="22" Opacity="0.22"
-                               Foreground="{Binding ClassBrush}" Background="Transparent" CornerRadius="2" />
-                  <TextBlock Text="{Binding Name}" Foreground="{Binding ClassBrush}" FontWeight="SemiBold"
-                             VerticalAlignment="Center" Margin="6,0" />
-                </Grid>
-              </DataTemplate>
-            </DataGridTemplateColumn.CellTemplate>
-          </DataGridTemplateColumn>
-          <DataGridTextColumn Header="Class" Binding="{Binding ClassName}" Width="110" />
-          <DataGridTextColumn Header="Time" Binding="{Binding Duration}" Width="76" />
-          <DataGridTextColumn Header="Damage" Binding="{Binding Damage}" Width="94" />
-          <DataGridTextColumn Header="%" Binding="{Binding Percent}" Width="56" />
-          <DataGridTextColumn Header="EncDPS" Binding="{Binding Dps}" Width="92" />
-          <DataGridTextColumn Header="EncHPS" Binding="{Binding Hps}" Width="94" />
-          <DataGridTextColumn Header="Taken" Binding="{Binding Taken}" Width="86" />
-          <DataGridTextColumn Header="Deaths" Binding="{Binding Deaths}" Width="80" />
-        </DataGrid.Columns>
-      </DataGrid>
+      <!-- The combatant tables; double-click a row for its abilities. -->
+      <Grid Grid.Row="1" RowDefinitions="2*,Auto,*" IsVisible="{Binding !DrillOpen}">
+        <DataGrid x:Name="AlliesGrid" ItemsSource="{Binding Allies}" Background="#1A1D27" DoubleTapped="OnCombatantDoubleTapped">
+          <DataGrid.Columns>
+            <DataGridTemplateColumn Header="Name" Width="2*">
+              <DataGridTemplateColumn.CellTemplate>
+                <DataTemplate x:DataType="vm:CombatantRowVm">
+                  <Grid Margin="6,0">
+                    <ProgressBar Value="{Binding Bar}" Maximum="1" MinHeight="22" Opacity="0.22"
+                                 Foreground="{Binding ClassBrush}" Background="Transparent" CornerRadius="2" />
+                    <TextBlock Text="{Binding Name}" Foreground="{Binding ClassBrush}" FontWeight="SemiBold"
+                               VerticalAlignment="Center" Margin="6,0" />
+                  </Grid>
+                </DataTemplate>
+              </DataGridTemplateColumn.CellTemplate>
+            </DataGridTemplateColumn>
+            <DataGridTextColumn Header="Class" Binding="{Binding ClassName}" Width="110" />
+            <DataGridTextColumn Header="Time" Binding="{Binding Duration}" Width="76" />
+            <DataGridTextColumn Header="Damage" Binding="{Binding Damage}" Width="94" />
+            <DataGridTextColumn Header="%" Binding="{Binding Percent}" Width="56" />
+            <DataGridTextColumn Header="EncDPS" Binding="{Binding Dps}" Width="92" />
+            <DataGridTextColumn Header="EncHPS" Binding="{Binding Hps}" Width="94" />
+            <DataGridTextColumn Header="Taken" Binding="{Binding Taken}" Width="86" />
+            <DataGridTextColumn Header="Deaths" Binding="{Binding Deaths}" Width="80" />
+          </DataGrid.Columns>
+        </DataGrid>
 
-      <TextBlock Grid.Row="2" Text="Enemies" Classes="header" Margin="0,10,0,4" />
-      <DataGrid Grid.Row="3" ItemsSource="{Binding Enemies}" Background="#1A1D27">
-        <DataGrid.Columns>
-          <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="2*" />
-          <DataGridTextColumn Header="Time" Binding="{Binding Duration}" Width="76" />
-          <DataGridTextColumn Header="Damage" Binding="{Binding Damage}" Width="94" />
-          <DataGridTextColumn Header="EncDPS" Binding="{Binding Dps}" Width="92" />
-          <DataGridTextColumn Header="Taken" Binding="{Binding Taken}" Width="86" />
-          <DataGridTextColumn Header="Deaths" Binding="{Binding Deaths}" Width="80" />
-        </DataGrid.Columns>
-      </DataGrid>
+        <TextBlock Grid.Row="1" Text="Enemies" Classes="header" Margin="0,10,0,4" />
+        <DataGrid Grid.Row="2" x:Name="EnemiesGrid" ItemsSource="{Binding Enemies}" Background="#1A1D27" DoubleTapped="OnCombatantDoubleTapped">
+          <DataGrid.Columns>
+            <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="2*" />
+            <DataGridTextColumn Header="Time" Binding="{Binding Duration}" Width="76" />
+            <DataGridTextColumn Header="Damage" Binding="{Binding Damage}" Width="94" />
+            <DataGridTextColumn Header="EncDPS" Binding="{Binding Dps}" Width="92" />
+            <DataGridTextColumn Header="Taken" Binding="{Binding Taken}" Width="86" />
+            <DataGridTextColumn Header="Deaths" Binding="{Binding Deaths}" Width="80" />
+          </DataGrid.Columns>
+        </DataGrid>
+      </Grid>
+
+      <!-- The drill-down: buckets, abilities, swings. -->
+      <Grid Grid.Row="1" RowDefinitions="Auto,Auto,*" IsVisible="{Binding DrillOpen}">
+        <Grid ColumnDefinitions="Auto,*,Auto" Margin="0,0,0,6">
+          <Button Content="‹ Back" Command="{Binding DrillBackCommand}" Padding="10,3" FontSize="12" />
+          <TextBlock Grid.Column="1" Text="{Binding DrillTitle}" Classes="header" FontSize="14" VerticalAlignment="Center"
+                     Margin="10,0" TextTrimming="CharacterEllipsis" />
+          <Button Grid.Column="2" Content="Close" Command="{Binding DrillCloseCommand}" Padding="10,3" FontSize="12" />
+        </Grid>
+        <TextBlock Grid.Row="1" Text="{Binding DrillHint}" Classes="muted" FontSize="11" Margin="0,0,0,4" />
+        <DataGrid Grid.Row="2" x:Name="AbilityGrid" ItemsSource="{Binding AbilityRows}" Background="#1A1D27"
+                  IsVisible="{Binding !DrillShowsSwings}" DoubleTapped="OnAbilityDoubleTapped">
+          <DataGrid.Columns>
+            <DataGridTemplateColumn Header="Name" Width="2.6*">
+              <DataGridTemplateColumn.CellTemplate>
+                <DataTemplate x:DataType="vm:AbilityRowVm">
+                  <Grid Margin="6,0">
+                    <ProgressBar Value="{Binding Bar}" Maximum="1" MinHeight="22" Opacity="0.22"
+                                 Foreground="#93B4FF" Background="Transparent" CornerRadius="2" />
+                    <TextBlock Text="{Binding Name}" Foreground="{Binding NameBrush}" VerticalAlignment="Center" Margin="6,0"
+                               FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                  </Grid>
+                </DataTemplate>
+              </DataGridTemplateColumn.CellTemplate>
+            </DataGridTemplateColumn>
+            <DataGridTextColumn Header="Hits" Binding="{Binding Hits}" Width="90" />
+            <DataGridTextColumn Header="Crit" Binding="{Binding CritPct}" Width="64" />
+            <DataGridTextColumn Header="Avg" Binding="{Binding Average}" Width="80" />
+            <DataGridTextColumn Header="Max" Binding="{Binding Max}" Width="80" />
+            <DataGridTextColumn Header="Total" Binding="{Binding Total}" Width="90" />
+            <DataGridTextColumn Header="DPS" Binding="{Binding Dps}" Width="84" />
+            <DataGridTextColumn Header="Share" Binding="{Binding Share}" Width="70" />
+            <DataGridTextColumn Header="Every" Binding="{Binding Every}" Width="74" />
+            <DataGridTextColumn Header="Types" Binding="{Binding Types}" Width="*" />
+          </DataGrid.Columns>
+        </DataGrid>
+        <DataGrid Grid.Row="2" ItemsSource="{Binding SwingRows}" Background="#1A1D27" IsVisible="{Binding DrillShowsSwings}">
+          <DataGrid.Columns>
+            <DataGridTextColumn Header="Time" Binding="{Binding Time}" Width="84" />
+            <DataGridTextColumn Header="Attacker" Binding="{Binding Attacker}" Width="*" />
+            <DataGridTextColumn Header="Victim" Binding="{Binding Victim}" Width="*" />
+            <DataGridTextColumn Header="Ability" Binding="{Binding Ability}" Width="*" />
+            <DataGridTextColumn Header="Damage" Binding="{Binding Damage}" Width="90" />
+            <DataGridTextColumn Header="Crit" Binding="{Binding Crit}" Width="56" />
+            <DataGridTextColumn Header="Type" Binding="{Binding Type}" Width="90" />
+            <DataGridTextColumn Header="Special" Binding="{Binding Special}" Width="100" />
+          </DataGrid.Columns>
+        </DataGrid>
+      </Grid>
     </Grid>
   </Grid>
 </UserControl>

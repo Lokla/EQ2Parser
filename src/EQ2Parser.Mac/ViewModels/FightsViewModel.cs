@@ -20,6 +20,9 @@ public sealed class FightItem(IFightView fight, bool live)
 /// <summary>A grid row, updated in place each tick so only changed cells repaint.</summary>
 public sealed partial class CombatantRowVm : ObservableObject
 {
+    /// <summary>The combatant's dictionary key — what the drill opens on.</summary>
+    public string Key { get; set; } = "";
+
     [ObservableProperty]
     private string _name = "";
 
@@ -107,6 +110,77 @@ public sealed partial class FightsViewModel(SourceManager manager) : ObservableO
 
     private bool CanUploadShown() => !IsLive && _shown is not null;
 
+    // ---- drill-down ----
+
+    public ObservableCollection<AbilityRowVm> AbilityRows { get; } = [];
+    public ObservableCollection<SwingRowVm> SwingRows { get; } = [];
+
+    [ObservableProperty]
+    private bool _drillOpen;
+
+    [ObservableProperty]
+    private bool _drillShowsSwings;
+
+    [ObservableProperty]
+    private string _drillTitle = "";
+
+    [ObservableProperty]
+    private string _drillHint = "";
+
+    private string? _drillKey;
+    private string? _drillBucket;
+    private string? _drillAbility;
+    private (IFightView? Fight, int Count, long LastTicks) _swingSig;
+
+    /// <summary>Open the drill on a combatant of the fight shown.</summary>
+    public void OpenDrill(string key)
+    {
+        _drillKey = key;
+        _drillBucket = null;
+        _drillAbility = null;
+        DrillOpen = true;
+        Tick();
+    }
+
+    /// <summary>One level deeper from a table row: bucket → abilities →
+    /// swings. Dividers and the deepest level go nowhere.</summary>
+    public void DrillInto(AbilityRowVm row)
+    {
+        if (row.IsDivider || _drillKey is null)
+            return;
+        if (_drillBucket is null)
+            _drillBucket = row.Key;
+        else if (_drillAbility is null)
+            _drillAbility = row.Key;
+        else
+            return;
+        Tick();
+    }
+
+    [RelayCommand]
+    private void DrillBack()
+    {
+        if (_drillAbility is not null)
+            _drillAbility = null;
+        else if (_drillBucket is not null)
+            _drillBucket = null;
+        else
+        {
+            DrillClose();
+            return;
+        }
+        Tick();
+    }
+
+    [RelayCommand]
+    private void DrillClose()
+    {
+        DrillOpen = false;
+        _drillKey = null;
+        AbilityRows.Clear();
+        SwingRows.Clear();
+    }
+
     partial void OnSelectedFightChanged(FightItem? value)
     {
         if (_settingSelection || value is null)
@@ -129,6 +203,7 @@ public sealed partial class FightsViewModel(SourceManager manager) : ObservableO
         List<RowData> enemies;
         string breadcrumb;
         bool live;
+        DrillData? drill = null;
         lock (manager.Sync)
         {
             var liveFights = manager.Sources
@@ -153,6 +228,9 @@ public sealed partial class FightsViewModel(SourceManager manager) : ObservableO
             _shown = fight;
             live = fight is Encounter { Active: true };
             (allies, enemies) = FightTable.Snapshot(fight, manager.Classifier);
+            drill = DrillOpen && _drillKey is not null
+                ? Drill.Snapshot(fight, _drillKey, _drillBucket, _drillAbility, manager.Classifier)
+                : null;
             var zone = string.IsNullOrEmpty(fight.Zone) ? "" : $"{fight.Zone}  |  ";
             var title = live && fight.Title == Encounter.PlaceholderTitle ? "Combat in progress" : fight.Title;
             breadcrumb = $"{zone}{title}  —  {FightTable.Span(fight.Duration)},  {FightTable.Compact(fight.EncDps)} enc DPS";
@@ -162,6 +240,51 @@ public sealed partial class FightsViewModel(SourceManager manager) : ObservableO
         SelectShown();
         Apply(Allies, allies);
         Apply(Enemies, enemies);
+        if (DrillOpen)
+            ApplyDrill(drill);
+    }
+
+    private void ApplyDrill(DrillData? drill)
+    {
+        if (drill is null)
+        {
+            DrillTitle = "Not in this fight";
+            DrillHint = "The combatant is not part of the fight shown. Back or Close returns to the fight.";
+            AbilityRows.Clear();
+            SwingRows.Clear();
+            return;
+        }
+        DrillTitle = drill.Title;
+        DrillShowsSwings = drill.Swings is not null;
+        if (drill.Table is { } table)
+        {
+            SwingRows.Clear();
+            _swingSig = default;
+            DrillHint = _drillBucket is null ? "Double-click a row for its abilities." : "Double-click a row for its swings.";
+            var top = Math.Max(1.0, table.Where(t => !t.IsDivider && t.Source != "all").Select(t => (double)t.Total).DefaultIfEmpty(1).Max());
+            var total = Math.Max(1.0, table.Where(t => !t.IsDivider && t.Source != "all").Sum(t => (double)t.Total));
+            for (var i = 0; i < table.Count; i++)
+            {
+                if (i >= AbilityRows.Count)
+                    AbilityRows.Add(new AbilityRowVm());
+                AbilityRows[i].Set(table[i], top, _drillBucket is null ? null : total);
+            }
+            while (AbilityRows.Count > table.Count)
+                AbilityRows.RemoveAt(AbilityRows.Count - 1);
+        }
+        else if (drill.Swings is { } swings)
+        {
+            AbilityRows.Clear();
+            DrillHint = swings.Count >= 2000 ? "The first 2,000 swings." : $"{swings.Count} swing(s).";
+            // Swings only ever grow; rebuild when they did.
+            var sig = (_shown, swings.Count, swings.Count > 0 ? swings[^1].Time.UtcTicks : 0);
+            if (sig == _swingSig)
+                return;
+            _swingSig = sig;
+            SwingRows.Clear();
+            foreach (var sw in swings)
+                SwingRows.Add(new SwingRowVm(sw));
+        }
     }
 
     private void RebuildList(List<Encounter> liveFights, IReadOnlyList<Core.Correlation.CorrelatedEncounter> history)
@@ -223,6 +346,7 @@ public sealed partial class FightsViewModel(SourceManager manager) : ObservableO
             if (i >= rows.Count)
                 rows.Add(new CombatantRowVm());
             var row = rows[i];
+            row.Key = data.Key;
             row.Name = data.Name;
             row.ClassName = data.ClassName;
             row.ClassBrush = new SolidColorBrush(Color.Parse(data.ColorHex));
