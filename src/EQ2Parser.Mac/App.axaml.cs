@@ -47,7 +47,7 @@ public sealed class App : Application
             };
             SessionJournal.Mark("startup complete — window shown");
             if (Program.Snapshot is { } snapshot)
-                SnapshotRun.Schedule(window, desktop, snapshot.Dir, snapshot.Seconds);
+                SnapshotRun.Schedule(window, desktop, manager, snapshot.Dir, snapshot.Seconds);
         }
         base.OnFrameworkInitializationCompleted();
     }

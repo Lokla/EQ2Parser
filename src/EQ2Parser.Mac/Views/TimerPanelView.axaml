@@ -1,0 +1,36 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:EQ2Parser.Mac.ViewModels"
+             x:Class="EQ2Parser.Mac.Views.TimerPanelView"
+             x:DataType="vm:TimerPanelViewModel">
+  <DockPanel Margin="0,8,0,8">
+    <TextBlock DockPanel.Dock="Top" Text="Timers" Classes="header" Margin="0,4,0,8" />
+    <Border Background="#1A1D27" CornerRadius="4" Padding="6">
+      <Panel>
+        <TextBlock Text="No timers running." Classes="muted" FontSize="12" IsVisible="{Binding IsEmpty}"
+                   HorizontalAlignment="Center" Margin="0,12" />
+        <ItemsControl ItemsSource="{Binding Bars}">
+          <ItemsControl.ItemTemplate>
+            <DataTemplate x:DataType="vm:TimerBarVm">
+              <Grid Margin="0,0,0,5" Height="30">
+                <Border Background="#262A38" CornerRadius="3" />
+                <ProgressBar Value="{Binding Fraction}" Maximum="1" Foreground="{Binding Fill}" Background="Transparent"
+                             MinHeight="30" CornerRadius="3" Opacity="0.75" />
+                <Grid ColumnDefinitions="*,Auto" Margin="8,0">
+                  <StackPanel VerticalAlignment="Center">
+                    <TextBlock Text="{Binding Name}" FontWeight="SemiBold" FontSize="12" Foreground="White"
+                               TextTrimming="CharacterEllipsis" />
+                    <TextBlock Text="{Binding Combatant}" FontSize="10" Foreground="#E2E4F0" Opacity="0.8"
+                               TextTrimming="CharacterEllipsis" />
+                  </StackPanel>
+                  <TextBlock Grid.Column="1" Text="{Binding TimeLeft}" FontWeight="Bold" FontSize="15" Foreground="White"
+                             VerticalAlignment="Center" Margin="6,0,0,0" />
+                </Grid>
+              </Grid>
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+      </Panel>
+    </Border>
+  </DockPanel>
+</UserControl>

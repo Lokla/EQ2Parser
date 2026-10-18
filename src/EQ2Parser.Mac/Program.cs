@@ -24,6 +24,8 @@ internal static class Program
         }
         CrashLog.Install();
         SessionJournal.Begin();
+        if (Snapshot is not null)
+            AlertAudioService.DefaultBackend = new SilentAlertAudioBackend(); // a snapshot never speaks
         LoopbackOnlyGuard.InstallIfRequested();
         var builder = Snapshot is null
             ? BuildAvaloniaApp()

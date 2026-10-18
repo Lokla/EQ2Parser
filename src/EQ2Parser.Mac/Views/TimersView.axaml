@@ -1,0 +1,73 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:EQ2Parser.Mac.ViewModels"
+             x:Class="EQ2Parser.Mac.Views.TimersView"
+             x:DataType="vm:TimersViewModel">
+  <Grid ColumnDefinitions="*,6,360" Margin="0,8,0,8">
+
+    <Grid RowDefinitions="Auto,*">
+      <Grid ColumnDefinitions="Auto,*" Margin="0,0,0,6">
+        <TextBlock Text="Spell timers" Classes="header" VerticalAlignment="Center" Margin="0,0,12,0" />
+        <TextBox Grid.Column="1" Text="{Binding Filter}" Watermark="Filter by name, zone or category" />
+      </Grid>
+      <DataGrid Grid.Row="1" ItemsSource="{Binding Timers}" SelectedItem="{Binding Selected}" Background="#1A1D27">
+        <DataGrid.Columns>
+          <DataGridTemplateColumn Header="On" Width="64">
+            <DataGridTemplateColumn.CellTemplate>
+              <DataTemplate x:DataType="vm:TimerRow">
+                <CheckBox IsChecked="{Binding Enabled}" HorizontalAlignment="Center" />
+              </DataTemplate>
+            </DataGridTemplateColumn.CellTemplate>
+          </DataGridTemplateColumn>
+          <DataGridTextColumn Header="Timer" Binding="{Binding Name}" Width="1.4*" />
+          <DataGridTextColumn Header="Zone / category" Binding="{Binding Scope}" Width="*" />
+          <DataGridTextColumn Header="Timing" Binding="{Binding Timing}" Width="130" />
+          <DataGridTextColumn Header="Sounds" Binding="{Binding Sounds}" Width="*" />
+          <DataGridTextColumn Header="From" Binding="{Binding Origin}" Width="76" />
+        </DataGrid.Columns>
+      </DataGrid>
+    </Grid>
+
+    <ScrollViewer Grid.Column="2">
+      <StackPanel Spacing="8" Margin="8,0,0,0">
+        <TextBlock Text="Timer" Classes="header" />
+        <TextBlock Text="Spell or ability that starts it (exact name)" Classes="muted" FontSize="12" />
+        <TextBox Text="{Binding Name}" IsEnabled="{Binding CanEdit}" />
+        <Grid ColumnDefinitions="*,8,*">
+          <StackPanel Spacing="4">
+            <TextBlock Text="Category" Classes="muted" FontSize="12" />
+            <TextBox Text="{Binding Category}" IsEnabled="{Binding CanEdit}" Watermark="General" />
+          </StackPanel>
+          <StackPanel Grid.Column="2" Spacing="4">
+            <TextBlock Text="Zone (optional)" Classes="muted" FontSize="12" />
+            <TextBox Text="{Binding Zone}" IsEnabled="{Binding CanEdit}" />
+          </StackPanel>
+        </Grid>
+        <Grid ColumnDefinitions="*,8,*">
+          <StackPanel Spacing="4">
+            <TextBlock Text="Duration (s)" Classes="muted" FontSize="12" />
+            <TextBox Text="{Binding Duration}" IsEnabled="{Binding CanEdit}" />
+          </StackPanel>
+          <StackPanel Grid.Column="2" Spacing="4">
+            <TextBlock Text="Warn at (s left)" Classes="muted" FontSize="12" />
+            <TextBox Text="{Binding Warning}" IsEnabled="{Binding CanEdit}" />
+          </StackPanel>
+        </Grid>
+        <TextBlock Text="On start" Classes="muted" FontSize="12" />
+        <TextBox Text="{Binding StartSound}" IsEnabled="{Binding CanEdit}" Watermark="tts, tts some words, or a sound file" />
+        <TextBlock Text="On warning" Classes="muted" FontSize="12" />
+        <TextBox Text="{Binding WarningSound}" IsEnabled="{Binding CanEdit}" Watermark="tts = “&lt;name&gt; soon”" />
+        <WrapPanel>
+          <Button Content="Test" Command="{Binding TestCommand}" Margin="0,0,6,6" />
+          <Button Content="Save" Command="{Binding SaveCommand}" Classes="accent" Margin="0,0,6,6" />
+          <Button Content="New" Command="{Binding NewCommand}" Margin="0,0,6,6" />
+          <Button Content="Delete" Command="{Binding DeleteCommand}" Margin="0,0,6,6" />
+          <Button Content="Undo" Command="{Binding UndoCommand}" Margin="0,0,6,6" />
+        </WrapPanel>
+        <TextBlock Text="{Binding Status}" TextWrapping="Wrap" Foreground="#FBBF24" FontSize="12" />
+        <TextBlock TextWrapping="Wrap" Classes="muted" FontSize="11" Margin="0,8,0,0"
+                   Text="“tts” speaks the timer's name on start and “&lt;name&gt; soon” on the warning; “tts some words” speaks those words. Timers also come from the EQ2Lexicon pack and from ACT spell timers imported on the Triggers page." />
+      </StackPanel>
+    </ScrollViewer>
+  </Grid>
+</UserControl>

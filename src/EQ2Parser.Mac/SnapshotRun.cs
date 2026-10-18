@@ -12,8 +12,16 @@ namespace EQ2Parser.Mac;
 /// session).</summary>
 internal static class SnapshotRun
 {
-    public static void Schedule(Window window, IClassicDesktopStyleApplicationLifetime desktop, string dir, double seconds)
+    public static void Schedule(Window window, IClassicDesktopStyleApplicationLifetime desktop,
+        global::EQ2Parser.App.Services.SourceManager manager, string dir, double seconds)
     {
+        // A few timers running when the pages are captured, so the timer
+        // panel shows bars (the audio backend is silent in this mode).
+        DispatcherTimer.RunOnce(() =>
+        {
+            foreach (var definition in manager.SpellTimers.Definitions.Where(d => d.Enabled).Take(3))
+                manager.SpellTimers.StartTest(definition);
+        }, TimeSpan.FromSeconds(Math.Max(0.5, seconds - 3)));
         // Tall enough that long pages (Settings) render whole.
         window.Height = 1400;
         window.Show();

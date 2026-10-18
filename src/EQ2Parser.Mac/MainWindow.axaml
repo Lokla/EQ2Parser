@@ -5,7 +5,7 @@
         x:Class="EQ2Parser.Mac.MainWindow"
         x:DataType="vm:MainViewModel"
         Title="EQ2Parser"
-        Width="1180" Height="720" MinWidth="760" MinHeight="460"
+        Width="1380" Height="760" MinWidth="900" MinHeight="460"
         Background="#15171F">
   <DockPanel>
     <Border DockPanel.Dock="Bottom" Background="#1C1F2A" Padding="12,5">
@@ -16,10 +16,17 @@
     </Border>
     <TabControl Padding="0" Margin="8,4,8,0">
       <TabItem Header="Fights">
-        <views:FightsView DataContext="{Binding Fights}" />
+        <Grid ColumnDefinitions="*,6,250">
+          <views:FightsView DataContext="{Binding Fights}" />
+          <GridSplitter Grid.Column="1" Background="Transparent" ResizeDirection="Columns" />
+          <views:TimerPanelView Grid.Column="2" DataContext="{Binding TimerPanel}" />
+        </Grid>
       </TabItem>
       <TabItem Header="Triggers">
         <views:TriggersView DataContext="{Binding Triggers}" />
+      </TabItem>
+      <TabItem Header="Timers">
+        <views:TimersView DataContext="{Binding Timers}" />
       </TabItem>
       <TabItem Header="Settings">
         <views:SettingsView DataContext="{Binding Settings}" />

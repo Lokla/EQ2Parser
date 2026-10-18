@@ -13,8 +13,11 @@ public sealed partial class MainViewModel : ObservableObject
 {
     private readonly SourceManager _manager;
     private readonly DispatcherTimer _timer;
+    private readonly DispatcherTimer _fastTimer;
 
     public FightsViewModel Fights { get; }
+    public TimerPanelViewModel TimerPanel { get; }
+    public TimersViewModel Timers { get; }
     public TriggersViewModel Triggers { get; }
     public SettingsViewModel Settings { get; }
 
@@ -29,6 +32,8 @@ public sealed partial class MainViewModel : ObservableObject
     {
         _manager = manager;
         Fights = new FightsViewModel(manager);
+        TimerPanel = new TimerPanelViewModel(manager);
+        Timers = new TimersViewModel(manager);
         Triggers = new TriggersViewModel(manager, async () =>
             window.Clipboard is { } clipboard ? await clipboard.TryGetTextAsync() : null);
         Settings = new SettingsViewModel(manager,
@@ -52,7 +57,20 @@ public sealed partial class MainViewModel : ObservableObject
         manager.CalloutAnnounced += text => Dispatcher.UIThread.Post(() => Notification = $"{DateTime.Now:HH:mm}  {text}");
         _timer = new DispatcherTimer(TimeSpan.FromSeconds(1), DispatcherPriority.Background, (_, _) => Tick());
         _timer.Start();
+        // The WPF shell's ~100 ms tick: the timer and callout clocks advance
+        // here whatever page is shown — warnings, expiries and callouts
+        // fire from it.
+        _fastTimer = new DispatcherTimer(TimeSpan.FromMilliseconds(100), DispatcherPriority.Background, (_, _) => FastTick());
+        _fastTimer.Start();
         Tick();
+    }
+
+    private void FastTick()
+    {
+        var now = DateTimeOffset.Now;
+        _manager.SpellTimers.Tick(now);
+        _manager.Callouts.Tick(now);
+        TimerPanel.Tick(now);
     }
 
     private void Tick()
