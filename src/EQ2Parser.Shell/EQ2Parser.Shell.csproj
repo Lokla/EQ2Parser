@@ -17,6 +17,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="EQ2Parser.Shell.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\EQ2Parser.Core\EQ2Parser.Core.csproj" />
   </ItemGroup>
 

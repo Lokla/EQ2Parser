@@ -24,6 +24,7 @@ internal static class Program
         }
         CrashLog.Install();
         SessionJournal.Begin();
+        LoopbackOnlyGuard.InstallIfRequested();
         var builder = Snapshot is null
             ? BuildAvaloniaApp()
             : AppBuilder.Configure<App>()

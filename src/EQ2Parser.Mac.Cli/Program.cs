@@ -67,6 +67,8 @@ internal static class Program
         Environment.SetEnvironmentVariable("EQ2PARSER_DATA_DIR", Path.GetFullPath(dataDir));
         Loc.Initialize("en");
         CrashLog.Install();
+        if (LoopbackOnlyGuard.InstallIfRequested())
+            Console.WriteLine($"{LoopbackOnlyGuard.EnvironmentVariable}=1: only loopback hosts are reachable.");
 
         if (listVoices)
         {
