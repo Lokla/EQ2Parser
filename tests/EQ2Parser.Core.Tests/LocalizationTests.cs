@@ -540,7 +540,7 @@ public class LocalizationTests
     private static readonly (string File, string Argument, string CoveredBy)[] DynamicCallSites =
     [
         // The {loc:Tr Key} markup extension: its keys are the XAML scan's.
-        ("Localization/Loc.cs", "Key", nameof(Every_Referenced_Key_Exists_In_English)),
+        ("Localization/TrExtension.cs", "Key", nameof(Every_Referenced_Key_Exists_In_English)),
         ("Views/ExportWindow.xaml.cs", "$\"Arch_{a}\"", nameof(Archetype_Keys_Exist_In_Every_Language)),
         ("ViewModels/ActImportFlow.cs", "locPrefix + \"ImportActXmlTitle\"", nameof(Act_Import_Keys_Exist_For_Every_Page_In_Every_Language)),
         ("ViewModels/ActImportFlow.cs", "locPrefix + \"XmlFileFilter\"", nameof(Act_Import_Keys_Exist_For_Every_Page_In_Every_Language)),
