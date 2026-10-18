@@ -80,7 +80,8 @@ internal static class Program
             using var audio = new AlertAudioService { VoiceId = voice };
             audio.Speak(say);
             audio.Speak("Second phrase, queued behind the first.");
-            Thread.Sleep(8000);
+            // Wait for the queue, not a fixed time: disposing stops playback.
+            audio.FlushAsync().Wait(TimeSpan.FromSeconds(60));
             return 0;
         }
 

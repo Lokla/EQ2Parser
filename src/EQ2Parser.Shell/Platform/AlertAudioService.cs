@@ -113,6 +113,21 @@ public sealed class AlertAudioService : IDisposable
         });
     }
 
+    /// <summary>Completes once everything queued before this call has been
+    /// spoken (or dropped) — for a caller about to dispose the service,
+    /// which would otherwise cut the last phrase off mid-word.</summary>
+    public Task FlushAsync()
+    {
+        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!_speech.Writer.TryWrite(_ =>
+            {
+                done.TrySetResult();
+                return Task.CompletedTask;
+            }))
+            done.TrySetResult();
+        return done.Task;
+    }
+
     /// <summary>Guard for the Settings Test button: 0 = idle, else the
     /// tick until which re-clicks are ignored.</summary>
     private long _testGuardUntilMs;
